@@ -8,18 +8,27 @@ A phone-first music player (audio only) that uses YouTube for its catalog. It ru
 - **Home**: Daily Mixes, Discover Weekly, On Repeat, Jump back in, Recently played and radios for your top artists.
 - **Player**: audio only, with shuffle, repeat, a queue, and autoplay radio when the queue runs out. When there's a choice, Echo picks the plain audio upload over the music video.
 - **Lyrics**: full lyrics from Genius, karaoke-style synced lyrics from lrclib, and a **Meaning** tab with Genius's "About this song" text and line-by-line explanations. Highlighted lyric lines can be tapped for their explanation.
-- **Downloads**: MP3 audio through a Python script (yt-dlp) running on your phone. Files go to Downloads/Echo and also play offline inside the app.
+- **Downloads**: MP3 audio through a Python script (yt-dlp) running on your phone. **Every song you listen to past 30 seconds is downloaded automatically**, and Library → Downloads has a button to download everything you've listened to. Files go to Downloads/Echo; downloaded songs play offline and in the background.
 - **Library**: Liked Songs, playlists, Downloads (you can also import any audio/video file) and History. It also has backup and restore.
+
+## Only songs
+
+Echo only plays songs, never "some video". Every track is checked before it plays:
+
+- It counts as a song if it's in the song catalog, or if Apple Music has a song with that title by an artist named on the upload.
+- Anything about a song rather than the song itself is rejected: making-of and behind-the-scenes clips, teasers, trailers, interviews, reactions, covers, fan edits, Shorts, status clips, jukeboxes and similar.
+- While a track plays, its length is checked against the real song. A 40-second clip or a 20-minute video is skipped.
+- Search shows songs only. There are no raw YouTube video results or link pasting.
 
 ## Song catalog (data/)
 
-[`data/songs.tsv`](data/songs.tsv) maps songs to YouTube video IDs. It's built by [`dataset/build.py`](dataset/build.py) from:
+[`data/songs.tsv`](data/songs.tsv) maps songs to YouTube video IDs, focused on **Indian (Bollywood, Punjabi, Tamil, Telugu, …) and English** music. It's built by [`dataset/build.py`](dataset/build.py) from:
 
-- **Wikidata**: every song, single or recording that has a performer and an official YouTube video ID.
-- **Apple Music charts** for 22 countries and 17 genres (Bollywood, Tamil, Telugu, Indian Pop and more). Any chart song not yet in the catalog is looked up on YouTube and added. The lookup prefers the plain audio upload (YouTube's auto-generated "Artist - Topic" channel or "Official Audio") and skips making-of clips, teasers and similar.
-- **A Japanese music-video set** from Hugging Face (`ayousanz/music-youtube-list`), filtered to real songs with at least 50,000 views. It's stored separately in `data/songs-jp.tsv` and only loads when you search in Japanese.
+- **Wikidata**: every song or single that has a performer and an official YouTube video ID (about 40,000).
+- **YouTube playlists** for 119 searches across Bollywood (by era, mood and singer), Punjabi, South Indian, regional, and English (by genre, decade and artist). Only items that look like songs are kept: 1.5–9 minutes long, at least 100,000 views, and none of the clip types listed above. Plain audio uploads are marked so they're preferred.
+- **Apple Music charts** for India (14 genres) and English-speaking countries. Any chart song that isn't in the catalog yet is looked up on YouTube.
 
-A GitHub Action ([`.github/workflows/dataset.yml`](.github/workflows/dataset.yml)) runs every Monday, so new songs keep arriving. It only ever adds songs. You can also run it any time from the repo's **Actions** tab, under **update song catalog** → **Run workflow**. Songs that the app matches on your phone are also remembered there.
+A GitHub Action ([`.github/workflows/dataset.yml`](.github/workflows/dataset.yml)) runs every Monday and continues where the last run stopped, so the catalog keeps growing with new songs. You can also start it any time from the repo's **Actions** tab, under **update song catalog** → **Run workflow**.
 
 ## Song radio: more like what you're hearing
 
