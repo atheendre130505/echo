@@ -421,10 +421,10 @@ function pickBest(t, list) {
   return bs >= 1 ? best : null;
 }
 /* ───────── Song catalog: data/songs.tsv ─────────
-   ~40k+ songs with their YouTube IDs (Wikidata + chart songs added weekly by
-   .github/workflows/dataset.yml), plus a Japanese catalog loaded only for
-   Japanese searches. Searching it is instant and needs no network after the
-   first load, and matched songs play straight away. */
+   Indian and English songs with their YouTube IDs (Wikidata, curated
+   playlists and chart songs, grown weekly by .github/workflows/dataset.yml).
+   Searching it is instant and needs no network after the first load, and
+   matched songs play straight away. */
 const JUNK_RE = /\b(making|behind the scenes|bts|teaser|trailer|promo|interview|reaction|karaoke|8d|slowed|reverb|nightcore|sped\s*up|jukebox|full album|dialogue|scene|status|ringtone|1 hour|10 hours|full movie|episode|vlog|unboxing|tutorial|dance cover|shorts)\b|#shorts/i;
 const DS = { rows: null, byKey: null, loading: null, jp: null, meta: null };
 const dsKey = (artist, title) => norm(primaryArtist(artist)) + '|' + norm(cleanForSearch(title));
