@@ -83,7 +83,15 @@ Search, charts, playback, Mixes, radio, recommendations and synced lyrics need *
 
 **You enter keys once.** They're saved on your phone in two places (localStorage and IndexedDB), and the app asks the browser to keep its storage permanently. If one copy is lost, the other restores it silently. For the worst case (all site data wiped), **Settings → Copy restore link** gives you a private link: open it once and your keys are back. Keys are never in the repo.
 
-## Downloads (Python + yt-dlp, on your phone)
+## Downloads
+
+A website can't save YouTube audio by itself (YouTube scrambles its audio links and blocks downloads from servers), so a small app on your phone does the work. Echo supports two:
+
+**Easy: the Seal app (nothing to set up).** Install [Seal](https://f-droid.org/packages/com.junkfood.seal/) from F-Droid or its [GitHub page](https://github.com/JunkFood02/Seal/releases/latest). It's free and open source; YouTube downloaders aren't allowed on the Play Store. Then tap Download in Echo, pick **Seal** in the share menu, choose **Audio**, and tap Download. Seal converts the song to MP3 and saves it to Download/Seal. After the first time, Download goes straight to the share menu. To play those files offline inside Echo, add them with Library → Downloads → Import.
+
+**Automatic: the Termux helper.** Use this if you want every song you listen to downloaded by itself and kept inside Echo. The setup is below.
+
+### Termux helper (Python + yt-dlp, on your phone)
 
 Downloads run through [`echo_dl.py`](echo_dl.py), a small Python script that uses yt-dlp. It runs on your own phone, so YouTube sees your normal connection. (Running it on GitHub's servers doesn't work: YouTube blocks them.)
 

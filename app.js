@@ -932,21 +932,40 @@ const SETUP_CMD = `curl -fsSL ${location.origin}${location.pathname.replace(/[^/
 async function helperUp() {
   try { const c = new AbortController(); setTimeout(() => c.abort(), 1500); const r = await fetch(HELPER + '/ping', { signal: c.signal }); return r.ok && (await r.json()).app === 'echo-dl'; } catch { return false; }
 }
+/* Simple way: hand the song to Seal, a free Android app (yt-dlp inside, converts to MP3).
+   No setup beyond installing it; Echo opens the share sheet with the song's link. */
+async function shareToSeal(t) {
+  const url = 'https://www.youtube.com/watch?v=' + t.id;
+  S.dlVia = 'seal'; saveS();
+  if (navigator.share) {
+    try { await navigator.share({ title: `${t.title} — ${t.artist}`, url }); toast('Pick Seal → Audio → Download. The MP3 goes to Download/Seal.', 5000); }
+    catch (e) { if (e.name !== 'AbortError') toast("Couldn't open the share menu"); }
+  } else { navigator.clipboard.writeText(url).then(() => toast('Link copied — paste it into Seal')); }
+}
 function helperSetup(t, kind) {
-  const s = sheet(`<div class="grab"></div><h3>Turn on downloads (one time)</h3>
-    <p class="muted small">Downloads use a small Python script (yt-dlp) that runs on your phone. Set it up once, then every Download button just works. Files go to <b>Downloads/Echo</b> and play offline here.</p>
+  const s = sheet(`<div class="grab"></div><h3>Download as MP3</h3>
+    <p class="muted small">A website can't save YouTube audio by itself, so a small app on your phone does it. Pick one (once):</p>
+    <h4 style="margin:16px 0 4px">Easy: Seal app <span class="muted small">(no setup)</span></h4>
     <ol class="steps">
-      <li>Install <b>Termux</b> from <a href="https://f-droid.org/packages/com.termux/" target="_blank" rel="noopener">F-Droid</a> (the Play Store version is outdated).</li>
-      <li>Open Termux, paste this and press Enter. When it asks for storage access, tap Allow.<pre id="cmd">${esc(SETUP_CMD)}</pre><button class="btn ghost" id="cpy">Copy command</button></li>
-      <li>Leave Termux running in the background, come back here and tap <b>Try again</b>.</li>
+      <li>Install <b>Seal</b> from <a href="https://f-droid.org/packages/com.junkfood.seal/" target="_blank" rel="noopener">F-Droid</a> or its <a href="https://github.com/JunkFood02/Seal/releases/latest" target="_blank" rel="noopener">GitHub page</a> (YouTube downloaders aren't allowed on the Play Store). It's free and open source.</li>
+      <li>Tap Download in Echo, pick <b>Seal</b> in the share menu, choose <b>Audio</b>, tap Download. Seal converts it to MP3 and saves it to <b>Download/Seal</b>.</li>
+      <li>Optional: add the files to Echo with <b>Library → Downloads → Import</b> to play them offline here.</li>
     </ol>
-    <p class="muted small">Next time, just open Termux once after restarting your phone; the helper starts by itself.</p>
-    <div class="bar"><button class="btn acc" id="retry">Try again</button></div>`);
+    ${t && t.id ? '<div class="bar"><button class="btn acc" id="seal">Share this song to Seal</button></div>' : ''}
+    <h4 style="margin:22px 0 4px">Automatic: Termux helper <span class="muted small">(one command)</span></h4>
+    <p class="muted small">Downloads every song you listen to by itself and keeps it inside Echo for offline and background play.</p>
+    <ol class="steps">
+      <li>Install <b>Termux</b> from <a href="https://f-droid.org/packages/com.termux/" target="_blank" rel="noopener">F-Droid</a>.</li>
+      <li>Open it, paste this, press Enter, tap Allow when asked:<pre id="cmd">${esc(SETUP_CMD)}</pre><button class="btn ghost" id="cpy">Copy command</button></li>
+      <li>Leave Termux running in the background, then tap <b>Try again</b>.</li>
+    </ol>
+    <div class="bar"><button class="btn ghost" id="retry">Try again</button></div>`);
+  const sb = $('#seal', s); if (sb) sb.onclick = () => { closeSheet(); shareToSeal(t); };
   $('#cpy', s).onclick = () => navigator.clipboard.writeText(SETUP_CMD).then(() => toast('Copied — paste it in Termux'));
-  $('#retry', s).onclick = () => { closeSheet(); download(t, kind); };
+  $('#retry', s).onclick = () => { closeSheet(); if (t && t.id) download(t, kind); };
 }
 async function download(t, kind, quiet) {
-  if (!(await helperUp())) { if (!quiet) helperSetup(t, kind); return; }
+  if (!(await helperUp())) { if (!quiet) (S.dlVia === 'seal' ? shareToSeal(t) : helperSetup(t, kind)); return; }
   const tn = quiet ? { set() {}, hide() {} } : toast(`Downloading “${t.title}” on your phone…`, 0);
   try {
     const r = await fetch(`${HELPER}/download?id=${encodeURIComponent(t.id)}&kind=${kind}`);
@@ -1085,7 +1104,7 @@ function openSettings() {
     <div class="help">Keys are saved on this phone permanently (in two places, and the browser is asked not to clear them). If the browser's data ever gets wiped, open your restore link once and everything comes back. It's a private link, so keep it to yourself (e.g. in your notes).</div>
     <div class="bar"><button class="btn ghost" id="sLink">Copy restore link</button></div>
     <p class="help" style="margin-top:18px">Everything (history, likes, playlists, keys) stays on this device. Echo is not affiliated with YouTube, Spotify or Genius.</p>`);
-  helperUp().then(ok => { const h = $('#hlp'); if (h) h.innerHTML = ok ? '✓ Download helper is running. Downloads are saved to Downloads/Echo.' : 'Download helper not running. Tap Download on any song for the one-time setup, or open Termux if you already set it up.'; });
+  helperUp().then(ok => { const h = $('#hlp'); if (h) h.innerHTML = ok ? '✓ Download helper is running. Downloads are saved to Downloads/Echo.' : (S.dlVia === 'seal' ? 'Download sends songs to the Seal app (MP3 in Download/Seal). ' : 'No download app set up yet. ') + '<a href="#" id="dlOpt">Download options</a>'; const o = $('#dlOpt'); if (o) o.onclick = e => { e.preventDefault(); helperSetup(null, 'audio'); }; });
   $('#sLink', s).onclick = () => { const keys = { ytKey: S.ytKey, geniusToken: S.geniusToken, country: S.country }; navigator.clipboard.writeText(location.origin + location.pathname + '#restore=' + btoa(unescape(encodeURIComponent(JSON.stringify(keys))))).then(() => toast('Restore link copied')); };
   $('#sSave', s).onclick = () => {
     S.country = ($('#sCc').value.trim().toLowerCase().match(/^[a-z]{2}$/) || [''])[0]; S.ytKey = $('#sYt').value.trim(); S.geniusToken = $('#sGe').value.trim();
