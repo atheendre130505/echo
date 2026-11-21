@@ -21,6 +21,17 @@ Tap any song (from search, a chart, trending or recently played) and Echo plays 
 
 Example from testing: Tum Hi Ho leads to Galliyan, Janam Janam, Agar Tum Saath Ho and Kaun Tujhe. Numb leads to Linkin Park, Eminem, Imagine Dragons and Green Day.
 
+## Your searches count too
+
+What you search for shows what you want to hear, even before you press play:
+
+- **Pressing search** gives the top matching song a search signal (+0.6, a bit more than starting a song, less than a full listen). If the query names an artist ("arijit singh"), that artist gets a signal too.
+- **Tapping a search result** counts as a stronger pick (+0.8), on top of the normal play signals.
+- When a search brings in an artist that wasn't in your taste yet, your Daily Mixes and Release Radar rebuild to include them.
+- Home shows **"Because you searched '…'"** with songs like your latest search (for 7 days).
+
+Search signals fade over time like everything else (14-day half-life).
+
 ## How the recommendations work
 
 The design follows Spotify's publicly described approach, built from parts that are available for free:

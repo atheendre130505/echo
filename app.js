@@ -132,7 +132,8 @@ const songKey = t => akey(t.artist) + '|' + norm(t.title.replace(/\s*[\(\[].*?[\
    Shelves: Daily Mixes (one per taste cluster/top artist, familiar + new),
    Discover Weekly (only artists you've never played, fixed for the week),
    On Repeat, Jump Back In, Recently Played, and endless Autoplay radio. */
-const W = { play: 0.25, done: 1, skip: -1.2 };
+// search = you searched and the top song matched; pick = you tapped a search result
+const W = { play: 0.25, done: 1, skip: -1.2, search: 0.6, pick: 0.8 };
 const HALF = 14 * DAY;
 let PROF = null;
 function logEv(k, t) {
@@ -146,7 +147,7 @@ function profile() {
   const now = Date.now(), tr = {}, ar = {}, cnt = {}, cnt30 = {}, last = {}, skips = {};
   for (const e of EV) {
     const d = Math.pow(0.5, (now - e.t) / HALF), w = (W[e.k] || 0) * d;
-    tr[e.i] = (tr[e.i] || 0) + w; if (e.a) ar[e.a] = (ar[e.a] || 0) + w;
+    if (e.i) tr[e.i] = (tr[e.i] || 0) + w; if (e.a) ar[e.a] = (ar[e.a] || 0) + w;
     if (e.k === 'done') { cnt[e.i] = (cnt[e.i] || 0) + 1; if (now - e.t < 30 * DAY) cnt30[e.i] = (cnt30[e.i] || 0) + 1; }
     if (e.k === 'skip') skips[e.i] = (skips[e.i] || 0) + 1;
     if (e.k === 'play') last[e.i] = e.t;
@@ -155,6 +156,24 @@ function profile() {
   return PROF = { tr, ar, cnt, cnt30, last, skips };
 }
 const hasHistory = () => EV.some(e => e.k !== 'skip') || LIKES.length > 0;
+/* Searches are taste signals too: what you look for shows intent before you play it.
+   The top matching song gets a search signal (song + its artist). If the query names
+   an artist ("arijit singh"), that artist gets one as well. New artists from a search
+   make Home rebuild your mixes and Release Radar. */
+function logSearch(q, ts) {
+  if (!ts || !ts.length) return;
+  const nq = norm(q), before = profile().ar;
+  const art = ts.map(t => primaryArtist(t.artist)).find(a => { const na = norm(a); return na.length > 2 && (nq.includes(na) || na.includes(nq)); });
+  resolveYT(ts[0]).then(r => {
+    logEv('search', r);
+    if (art && akey(art) !== akey(r.artist)) logEv('search', { id: '', artist: art });
+    store.set('lastSearch', { q, id: r.id, at: Date.now() });
+    if (!(before[akey(r.artist)] > 0)) { HOME = null; store.del('home'); if (RR) RR.at = 0; }
+  }).catch(() => { if (art) logEv('search', { id: '', artist: art }); });
+}
+function logPick(q, t) {
+  resolveYT(t).then(r => { logEv('pick', r); store.set('lastSearch', { q, id: r.id, at: Date.now() }); }).catch(() => {});
+}
 function topTracks(n, filter) {
   const p = profile();
   return Object.entries(p.tr).filter(([id, s]) => s > 0 && META[id] && !id.startsWith('local:') && (!filter || filter(META[id]))).sort((a, b) => b[1] - a[1]).slice(0, n).map(x => x[0]);
@@ -914,7 +933,7 @@ function rowHTML(t, i, noMenu) {
 function bindRows(root, tracks, ctx, ctxKey, opts = {}) {
   root.onclick = e => {
     const m = e.target.closest('[data-menu]'); if (m) { e.stopPropagation(); trackMenu(tracks[+m.dataset.menu], opts); return; }
-    const r = e.target.closest('.row[data-i]'); if (r) { const i = +r.dataset.i; if (cur() && cur().id === tracks[i].id) { openNP(); return; } opts.radio ? startRadio(tracks[i]) : playQueue(tracks, i, ctx, ctxKey); }
+    const r = e.target.closest('.row[data-i]'); if (r) { const i = +r.dataset.i; if (cur() && cur().id === tracks[i].id) { openNP(); return; } if (opts.onPick) opts.onPick(tracks[i]); opts.radio ? startRadio(tracks[i]) : playQueue(tracks, i, ctx, ctxKey); }
   };
 }
 function cardHTML(c) {
@@ -925,7 +944,7 @@ function cardHTML(c) {
   return `<button class="card" data-go="${esc(c.go || '')}" data-play="${esc(c.play || '')}" data-cq="${esc(c.cq || '')}" data-rq="${esc(c.rq || '')}"><div class="cov">${cov}${c.color ? `<i class="tag" style="background:${c.color}"></i><div class="band">${esc(c.title)}</div>` : ''}</div><b>${esc(c.title)}</b><span>${esc(c.sub || '')}</span></button>`;
 }
 function greeting() { const h = new Date().getHours(); return h < 5 ? 'Good night' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; }
-let BEC = { id: null, list: [] };
+const BEC = {};
 let homeBuilding = null, rrBuilding = null, RR = store.get('rr:list', null);
 const skelCards = n => Array.from({ length: n }, () => '<div class="card"><div class="cov skel"></div><b class="muted">&nbsp;</b></div>').join('');
 const chartCards = () => GENRES.slice(0, 10).map(([g, n, c]) => `<button class="card" data-go="list/chart:${g}"><div class="cov genre-cov" style="background:${c}"><span>${esc(n)}</span><small>${g ? 'Top songs' : esc(countryName())}</small></div><b>${esc(g ? n + ' — Top songs' : 'Top 50 — ' + countryName())}</b><span>Updated daily</span></button>`).join('');
@@ -956,7 +975,9 @@ async function viewHome() {
       const onRepeat = Object.entries(profile().cnt30).filter(([id, n]) => n >= 2 && META[id]).sort((a, b) => b[1] - a[1]).map(x => x[0]);
       if (onRepeat.length >= 3) mixes.push({ title: 'On Repeat', sub: 'Songs you love right now', ids: onRepeat, go: 'list/repeat', collage: true });
       const last = (cur() && !cur().pending && !String(cur().id).startsWith('local:')) ? cur() : META[recent.find(id => META[id] && !String(id).startsWith('local:'))];
-      if (last) h += `<h3 class="sh">More like ${esc(last.title)}</h3><div class="shelf" id="because" data-seed="${esc(last.id)}">${skelCards(4)}</div>`;
+      if (last) h += `<h3 class="sh">More like ${esc(last.title)}</h3><div class="shelf sim" data-seed="${esc(last.id)}">${skelCards(4)}</div>`;
+      const ls = store.get('lastSearch');
+      if (ls && Date.now() - ls.at < 7 * DAY && META[ls.id] && (!last || ls.id !== last.id)) h += `<h3 class="sh">Because you searched “${esc(ls.q)}”</h3><div class="shelf sim" data-seed="${esc(ls.id)}">${skelCards(4)}</div>`;
       h += `<h3 class="sh">Made for you</h3><div class="shelf">${mixes.map(cardHTML).join('') || ''}${homeBuilding || rrBuilding ? '<div class="card"><div class="cov skel"></div><b class="muted">Mixing…</b></div>' : ''}</div>`;
       if (recent.length) h += `<h3 class="sh">Recently played</h3><div class="shelf">${recent.filter(id => META[id]).slice(0, 15).map(id => cardHTML({ title: META[id].title, sub: META[id].artist, id, play: id })).join('')}</div>`;
       const p = profile(), now = Date.now();
@@ -971,8 +992,7 @@ async function viewHome() {
       h += `<h3 class="sh">Charts</h3><div class="shelf">${chartCards()}</div>`;
     }
     hs.innerHTML = h;
-    const bc = $('#because');
-    if (bc) { const sid = bc.dataset.seed; (BEC.id === sid ? Promise.resolve(BEC.list) : radioFor(META[sid]).then(l => (BEC = { id: sid, list: l }).list))
+    for (const bc of $$('.shelf.sim')) { const sid = bc.dataset.seed; (BEC[sid] ? Promise.resolve(BEC[sid]) : radioFor(META[sid]).then(l => (BEC[sid] = l)))
       .then(l => { if (!document.body.contains(bc)) return; bc.innerHTML = l.slice(0, 20).map(t => cardHTML({ title: t.title, sub: t.artist, id: t.id, rq: t.id })).join('') || '<p class="muted small">Play a bit more to see similar songs.</p>'; })
       .catch(() => { bc.innerHTML = ''; }); }
     const tr = $('#trend');
@@ -1017,20 +1037,20 @@ function viewSearch(q = '') {
     sr.innerHTML = (loc.length ? `<h3 class="sh">In your library</h3><div id="srl">${loc.map((t, i) => rowHTML(t, i)).join('')}</div>` : '') +
       `<div id="sra"><h3 class="sh">Songs</h3><p class="muted small">Searching…</p></div>` +
       (remote ? `<div id="srv"><h3 class="sh">Videos</h3><p class="muted small">Searching YouTube… this takes a few seconds</p></div>` : '');
-    if (loc.length) bindRows($('#srl'), loc, 'Search: ' + s, '', { radio: true });
+    if (loc.length) bindRows($('#srl'), loc, 'Search: ' + s, '', { radio: true, onPick: t => logPick(s, t) });
     itunesSearch(s).then(ts => {
       if (my !== tok) return; const el = $('#sra');
       if (!ts.length) { el.innerHTML = remote ? '' : '<p class="muted small" style="margin-top:12px">No songs found. Press search to look on YouTube.</p>'; return; }
       el.innerHTML = '<h3 class="sh">Songs</h3>' + ts.map((t, i) => rowHTML(t, i)).join('');
-      bindRows(el, ts, 'Search: ' + s, '', { radio: true });
-      if (remote && ts[0]) resolveYT(ts[0]).catch(() => {});
+      bindRows(el, ts, 'Search: ' + s, '', { radio: true, onPick: t => logPick(s, t) });
+      if (remote) logSearch(s, ts);
     }).catch(() => { if (my === tok) $('#sra').innerHTML = ''; });
     if (!remote) return;
     store.set('recentQ', [s, ...recentQ.filter(x => x.toLowerCase() !== s.toLowerCase())].slice(0, 10));
     ytSearch(s).then(ts => {
       if (my !== tok) return; const el = $('#srv');
       el.innerHTML = '<h3 class="sh">Videos</h3>' + ts.slice(0, 15).map((t, i) => rowHTML(t, i)).join('');
-      bindRows(el, ts.slice(0, 15), 'Search: ' + s, '', { radio: true });
+      bindRows(el, ts.slice(0, 15), 'Search: ' + s, '', { radio: true, onPick: t => logPick(s, t) });
     }).catch(e => { if (my === tok) $('#srv').innerHTML = `<p class="muted small">YouTube search didn’t answer (${esc(e.message)}). Songs above still play.</p>`; });
   };
   let deb; inp.oninput = () => { clearTimeout(deb); deb = setTimeout(() => inp.value.trim() ? show(inp.value.trim(), false) : browse(), 450); };
