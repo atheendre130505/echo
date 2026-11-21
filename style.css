@@ -210,3 +210,5 @@ h3.sh{font-size:20px;margin:26px 0 12px;letter-spacing:-.2px}
 .steps li{margin:8px 0}
 .steps a{color:var(--acc)}
 .steps pre{background:#111;border:1px solid #444;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#fff;margin:8px 0}
+/* audio-only: the Song/Video switch is gone */
+#npMode{display:none}

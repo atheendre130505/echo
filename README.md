@@ -1,14 +1,25 @@
 # Echo
 
-A phone-first music and video player that uses YouTube for its catalog. It runs as a static site on GitHub Pages. There is no server and no account; everything is stored on your phone.
+A phone-first music player (audio only) that uses YouTube for its catalog. It runs as a static site on GitHub Pages. There is no server and no account; everything is stored on your phone.
 
-- **Search with no keys**: song results appear instantly from Apple's music catalog, and YouTube video results follow a few seconds later. Tap any song and Echo finds the matching YouTube video and plays it.
+- **Song catalog**: tens of thousands of songs with their YouTube IDs (see below). Searches hit it instantly, and those songs play straight away.
+- **Search with no keys**: catalog results first, then Apple's music catalog, then YouTube results a few seconds later. Tap any song and Echo finds the right upload and plays it.
 - **New music without searching**: "Trending in your country", daily charts for 16 genres (Bollywood, Tamil, Telugu, Indian Pop, Pop, Hip-Hop, K-Pop…), and **Release Radar**, which shows new songs from artists you listen to.
 - **Home**: Daily Mixes, Discover Weekly, On Repeat, Jump back in, Recently played and radios for your top artists.
-- **Player**: switch between *Song* and *Video*, with shuffle, repeat, a queue, and autoplay radio when the queue runs out.
+- **Player**: audio only, with shuffle, repeat, a queue, and autoplay radio when the queue runs out. When there's a choice, Echo picks the plain audio upload over the music video.
 - **Lyrics**: full lyrics from Genius, karaoke-style synced lyrics from lrclib, and a **Meaning** tab with Genius's "About this song" text and line-by-line explanations. Highlighted lyric lines can be tapped for their explanation.
-- **Downloads**: audio (MP3) or video (MP4) through a Python script (yt-dlp) running on your phone. Files go to Downloads/Echo and also play offline inside the app.
+- **Downloads**: MP3 audio through a Python script (yt-dlp) running on your phone. Files go to Downloads/Echo and also play offline inside the app.
 - **Library**: Liked Songs, playlists, Downloads (you can also import any audio/video file) and History. It also has backup and restore.
+
+## Song catalog (data/)
+
+[`data/songs.tsv`](data/songs.tsv) maps songs to YouTube video IDs. It's built by [`dataset/build.py`](dataset/build.py) from:
+
+- **Wikidata**: every song, single or recording that has a performer and an official YouTube video ID.
+- **Apple Music charts** for 22 countries and 17 genres (Bollywood, Tamil, Telugu, Indian Pop and more). Any chart song not yet in the catalog is looked up on YouTube and added. The lookup prefers the plain audio upload (YouTube's auto-generated "Artist - Topic" channel or "Official Audio") and skips making-of clips, teasers and similar.
+- **A Japanese music-video set** from Hugging Face (`ayousanz/music-youtube-list`), filtered to real songs with at least 50,000 views. It's stored separately in `data/songs-jp.tsv` and only loads when you search in Japanese.
+
+A GitHub Action ([`.github/workflows/dataset.yml`](.github/workflows/dataset.yml)) runs every Monday, so new songs keep arriving. It only ever adds songs. You can also run it any time from the repo's **Actions** tab, under **update song catalog** → **Run workflow**. Songs that the app matches on your phone are also remembered there.
 
 ## Song radio: more like what you're hearing
 
@@ -75,7 +86,7 @@ One-time setup on Android:
    curl -fsSL https://atheendre130505.github.io/echo/setup.sh | bash
    ```
    This installs Python, ffmpeg and yt-dlp and starts the helper. It also makes the helper start whenever Termux opens.
-3. Tap Download in Echo. Songs are saved as MP3 (videos as MP4, 720p) to **Downloads/Echo**, and they also play offline inside the app.
+3. Tap Download in Echo. Songs are saved as MP3 to **Downloads/Echo**, and they also play offline inside the app.
 
 After restarting your phone, open Termux once. Run the same command again any time to update yt-dlp.
 
@@ -87,7 +98,7 @@ On a computer, `pip install yt-dlp` then `python echo_dl.py --serve` does the sa
 - **Background play / screen off:** YouTube's embedded player pauses when Brave goes to the background. Two fixes:
   - Turn on Brave's background video setting (Android: *Settings → Media → Background video playback*; on older versions it's the flag `brave://flags/#brave-background-video-playback`).
   - Or download a song: downloaded songs play through the phone's own media player, so they keep going with the screen locked, and lock-screen controls work.
-- If a song won't start the first time, tap the video once. Some phones need a single tap inside the YouTube player before it is allowed to play.
+- If a song won't start the first time, tap the player once. Some phones need a single tap inside the YouTube player before it is allowed to play.
 
 ## Limits
 

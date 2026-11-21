@@ -1,0 +1,29 @@
+name: update song catalog
+# Weekly: refresh from Wikidata and add new chart songs (with their YouTube IDs) to data/.
+on:
+  schedule:
+    - cron: '17 3 * * 1'   # Mondays 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      chart_budget: { description: max new-song lookups this run, default: '1500' }
+permissions:
+  contents: write
+concurrency: { group: dataset, cancel-in-progress: false }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Build catalog
+        env: { BUDGET: '${{ inputs.chart_budget || 1500 }}' }
+        run: python -u dataset/build.py --chart-budget "$BUDGET"
+      - name: Commit if changed
+        run: |
+          git config user.name "echo-catalog-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet || git commit -m "Song catalog update $(date -u +%F)"
+          git push

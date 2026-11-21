@@ -214,7 +214,8 @@ async function rank(cands, o = {}) {
     if (p.last[t.id] && Date.now() - p.last[t.id] < 4 * 3600e3) s -= 1.5;
     if (o.novelty === 'new' && known) continue;
     if (o.novelty === 'familiar' && known) s += 0.6;
-    if (/\b(live|reaction|cover|karaoke|instrumental|8d|slowed|sped up|nightcore|1 hour|10 hours)\b/i.test(t.raw || '') && !o.allowVariants) s -= 1.2;
+    if (!o.allowVariants && JUNK_RE.test(t.raw || t.title || '')) continue; // making-of, teasers, shorts, reactions… are not songs
+    if (/\b(live|instrumental)\b/i.test(t.raw || '') && !o.allowVariants) s -= 1.2;
     s += -Math.log(-Math.log(r() * 0.999 + 0.0005)) * 0.35; // gumbel exploration
     scored.push({ t, s });
   }
@@ -230,7 +231,7 @@ async function rank(cands, o = {}) {
     if (out.length >= (o.n || 25)) break;
   }
   for (const h of held) { if (out.length >= (o.n || 25)) break; if (!seen.has(songKey(h.t))) { out.push(h.t); seen.add(songKey(h.t)); } }
-  return out;
+  return out.map(dsAudioOf);
 }
 const MIX_COLORS = ['#e8115b', '#1e3264', '#8d67ab', '#e1118c', '#148a08', '#bc5900', '#509bf5', '#dc148c'];
 async function buildHome(onShelf) {
@@ -407,7 +408,10 @@ function pickBest(t, list) {
     let s = -i * 0.15;
     if (nt && tt.includes(nt)) s += 3; else if (nt && nt.length > 4 && nt.includes(norm(v.title))) s += 1;
     if (na && (tt.includes(na) || ch.includes(na))) s += 2;
-    if (/\s-\stopic$/i.test(v.ch || '') || /vevo$/i.test(v.ch || '')) s += 1.5;
+    if (/\s-\stopic$/i.test(v.ch || '')) s += 2.5;            // auto-generated studio audio: exactly the song
+    else if (/vevo$/i.test(v.ch || '')) s += 1;
+    if (/official audio|\((full )?audio\)|\[audio\]|audio song|full audio/i.test(raw)) s += 1.5;
+    if (JUNK_RE.test(raw) && !JUNK_RE.test(t.title)) s -= 5;
     if (t.dur && v.dur) { const d = Math.abs(t.dur - v.dur); s += d < 4 ? 2 : d < 15 ? 1 : d > 90 ? -3 : 0; }
     if (!variant && /\b(live|cover|karaoke|8d|slowed|reverb|sped\s*up|nightcore|instrumental|remix|reaction|1 hour|10 hours|teaser|trailer|lofi|lo-fi|status|ringtone)\b/i.test(raw)) s -= 3;
     if (v.dur > 900) s -= 4;
@@ -416,12 +420,69 @@ function pickBest(t, list) {
   });
   return bs >= 1 ? best : null;
 }
+/* ───────── Song catalog: data/songs.tsv ─────────
+   ~40k+ songs with their YouTube IDs (Wikidata + chart songs added weekly by
+   .github/workflows/dataset.yml), plus a Japanese catalog loaded only for
+   Japanese searches. Searching it is instant and needs no network after the
+   first load, and matched songs play straight away. */
+const JUNK_RE = /\b(making|behind the scenes|bts|teaser|trailer|promo|interview|reaction|karaoke|8d|slowed|reverb|nightcore|sped\s*up|jukebox|full album|dialogue|scene|status|ringtone|1 hour|10 hours|full movie|episode|vlog|unboxing|tutorial|dance cover|shorts)\b|#shorts/i;
+const DS = { rows: null, byKey: null, loading: null, jp: null, meta: null };
+const dsKey = (artist, title) => norm(primaryArtist(artist)) + '|' + norm(cleanForSearch(title));
+function dsParse(text) {
+  const out = [];
+  for (const line of text.split('\n')) { const p = line.split('\t'); if (p.length < 3 || p[0] === 'id') continue; p.nt = norm(p[1]); p.na = norm(p[2]); out.push(p); }
+  return out;
+}
+function loadDS(jp) {
+  if (jp) return DS.jp || (DS.jp = fetch('data/songs-jp.tsv?u=' + ((DS.meta && DS.meta.updated) || '')).then(r => r.ok ? r.text() : '').then(dsParse).catch(() => []));
+  return DS.loading || (DS.loading = fetch('data/meta.json', { cache: 'no-cache' }).then(r => r.json()).catch(() => ({}))
+    .then(m => { DS.meta = m; return fetch('data/songs.tsv?u=' + (m.updated || '')); }).then(r => r.ok ? r.text() : '')
+    .then(t => {
+      DS.rows = dsParse(t); DS.byKey = new Map();
+      for (const p of DS.rows) { const k = dsKey(p[2], p[1]), e = DS.byKey.get(k); if (!e || (p[5] === 'a' && e[5] !== 'a')) DS.byKey.set(k, p); }
+      return DS.rows;
+    }).catch(() => (DS.rows = [])));
+}
+function dsTrack(p) {
+  if (!META[p[0]] || !META[p[0]].fixed) META[p[0]] = Object.assign(META[p[0]] || {}, { id: p[0], title: p[1], artist: p[2], year: p[3], kind: p[5], fixed: true });
+  return META[p[0]];
+}
+async function dsFind(t) { await loadDS(); const p = DS.byKey && DS.byKey.get(dsKey(t.artist, t.title)); return p ? dsTrack(p) : null; }
+// the catalog's audio upload of the same song, if it has one (keeps likes/history on the original id otherwise)
+function dsAudioOf(t) {
+  if (!DS.byKey || !t || t.kind === 'a') return t;
+  const p = DS.byKey.get(dsKey(t.artist, t.title));
+  return p && p[5] === 'a' && p[0] !== t.id ? dsTrack(p) : t;
+}
+async function dsSearch(q, n = 20) {
+  const cjk = /[぀-ヿ一-鿿]/.test(q);
+  const rows = (await loadDS()).concat(cjk ? await loadDS(true) : []);
+  const toks = q.toLowerCase().split(/\s+/).map(norm).filter(Boolean); if (!toks.length) return [];
+  const nq = norm(q), hits = [];
+  for (const p of rows) {
+    const hay = p.nt + '\u0001' + p.na;
+    if (!toks.every(k => hay.includes(k))) continue;
+    let sc = 0;
+    if (p.nt === nq) sc += 6; else if (p.nt.startsWith(nq)) sc += 3;
+    if (p.na === nq) sc += 4; else if (p.na.startsWith(nq)) sc += 2;
+    if (toks.every(k => p.nt.includes(k))) sc += 1;
+    if (p[5] === 'a') sc += 0.3;
+    sc += Math.min(1, Math.max(0, (+p[3] || 1990) - 1990) / 35);   // gently favour newer songs
+    hits.push([sc, p]);
+  }
+  hits.sort((a, b) => b[0] - a[0]);
+  const seen = new Set(), out = [];
+  for (const [, p] of hits) { const k = dsKey(p[2], p[1]); if (seen.has(k)) continue; seen.add(k); out.push(dsTrack(DS.byKey && DS.byKey.get(k) || p)); if (out.length >= n) break; }
+  return out;
+}
 const resolving = {};
 function resolveYT(t) {
   if (!t || !t.pending) return Promise.resolve(t);
   const m = store.get('map:' + t.id);
   if (m && META[m.yt]) return Promise.resolve(META[m.yt]);
   return resolving[t.id] || (resolving[t.id] = (async () => {
+    const hit = await dsFind(t).catch(() => null);
+    if (hit) { store.set('map:' + t.id, { yt: hit.id }); return hit; }
     const list = await ytSearch([primaryArtist(t.artist), cleanForSearch(t.title), ...variantWords(t.title)].join(' '));
     const best = pickBest(t, list); if (!best) throw new Error('not found');
     // first match wins: another Apple version that maps to the same video must not rename it
@@ -473,7 +534,7 @@ async function loadCur(autoplay = true) {
 async function pickLocal(t) {
   const d = DLX[t.id]; if (!d) return null;
   if (!S.preferLocal && navigator.onLine && !String(t.id).startsWith('local:')) return null;
-  const want = S.mode === 'video' && d.video ? 'video' : d.audio ? 'audio' : 'video';
+  const want = d.audio ? 'audio' : 'video';
   return d[want] ? t.id + ':' + want : null;
 }
 let extending = false;
@@ -583,7 +644,7 @@ function renderPlayer() {
   renderLike(); renderPP(); setMode(S.mode);
 }
 function setMode(m, temp) {
-  if (!temp) { S.mode = m; saveS(); }
+  if (!temp) m = 'audio';   // audio-only app; video is shown only briefly when a phone needs one tap on the player to start
   $('#np').classList.toggle('video', m === 'video');
   $$('#npMode button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
 }
@@ -852,7 +913,7 @@ function trackMenu(t, opts = {}) {
     <button class="mi" data-a="next">${ic('next2')}Play next</button>
     <button class="mi" data-a="queue">${ic('queue')}Add to queue</button>
     <button class="mi" data-a="radio">${ic('radio')}Go to song radio</button>
-    ${String(t.id).startsWith('local:') ? '' : `<button class="mi" data-a="dla">${ic('dl')}Download audio</button><button class="mi" data-a="dlv">${ic('film')}Download video</button>`}
+    ${String(t.id).startsWith('local:') ? '' : `<button class="mi" data-a="dla">${ic('dl')}Download</button>`}
     ${DLX[t.id] ? `<button class="mi" data-a="rmdl">${ic('trash')}Remove download</button>` : ''}
     ${String(t.id).startsWith('local:') || t.pending ? '' : `<button class="mi" data-a="share">${ic('share')}Share</button><a class="mi" href="https://www.youtube.com/watch?v=${esc(t.id)}" target="_blank" rel="noopener">${ic('yt')}Open on YouTube</a>`}`);
   s.onclick = async e => {
@@ -1048,15 +1109,24 @@ function viewSearch(q = '') {
     if (id) { sr.innerHTML = '<p class="muted">Loading link…</p>'; try { const t = await meta(id); sr.innerHTML = rowHTML(t, 0); bindRows(sr, [t], 'Link', '', { radio: true }); } catch { sr.innerHTML = '<p class="empty">Couldn’t load that YouTube link.</p>'; } return; }
     const loc = localResults(s);
     sr.innerHTML = (loc.length ? `<h3 class="sh">In your library</h3><div id="srl">${loc.map((t, i) => rowHTML(t, i)).join('')}</div>` : '') +
-      `<div id="sra"><h3 class="sh">Songs</h3><p class="muted small">Searching…</p></div>` +
+      `<div id="srd"></div><div id="sra"><h3 class="sh">More songs</h3><p class="muted small">Searching…</p></div>` +
       (remote ? `<div id="srv"><h3 class="sh">Videos</h3><p class="muted small">Searching YouTube… this takes a few seconds</p></div>` : '');
     if (loc.length) bindRows($('#srl'), loc, 'Search: ' + s, '', { radio: true, onPick: t => logPick(s, t) });
-    itunesSearch(s).then(ts => {
-      if (my !== tok) return; const el = $('#sra');
-      if (!ts.length) { el.innerHTML = remote ? '' : '<p class="muted small" style="margin-top:12px">No songs found. Press search to look on YouTube.</p>'; return; }
+    let dsHits = [];
+    dsSearch(s).then(ts => {
+      if (my !== tok || !ts.length) return; dsHits = ts; const el = $('#srd');
       el.innerHTML = '<h3 class="sh">Songs</h3>' + ts.map((t, i) => rowHTML(t, i)).join('');
       bindRows(el, ts, 'Search: ' + s, '', { radio: true, onPick: t => logPick(s, t) });
       if (remote) logSearch(s, ts);
+    }).catch(() => {});
+    itunesSearch(s).then(ts => {
+      if (my !== tok) return; const el = $('#sra');
+      if (!ts.length) { el.innerHTML = remote ? '' : '<p class="muted small" style="margin-top:12px">No songs found. Press search to look on YouTube.</p>'; return; }
+      const have = new Set(dsHits.map(songKey)); ts = ts.filter(t => !have.has(songKey(t)));
+      if (!ts.length) { el.innerHTML = ''; return; }
+      el.innerHTML = `<h3 class="sh">${dsHits.length ? 'More songs' : 'Songs'}</h3>` + ts.map((t, i) => rowHTML(t, i)).join('');
+      bindRows(el, ts, 'Search: ' + s, '', { radio: true, onPick: t => logPick(s, t) });
+      if (remote && !dsHits.length) logSearch(s, ts);
     }).catch(() => { if (my === tok) $('#sra').innerHTML = ''; });
     if (!remote) return;
     store.set('recentQ', [s, ...recentQ.filter(x => x.toLowerCase() !== s.toLowerCase())].slice(0, 10));
@@ -1158,7 +1228,7 @@ $('#shuf').onclick = () => {
 };
 $('#rep').onclick = () => { PS.repeat = (PS.repeat + 1) % 3; renderPlayer(); toast(['Repeat off', 'Repeat all', 'Repeat one'][PS.repeat], 1200); };
 $('#npLike').onclick = () => toggleLike(cur());
-$('#npDl').onclick = () => { const t = cur(); if (!t) return; if (String(t.id).startsWith('local:')) { toast('Already on your device'); return; } const s = sheet(`<div class="grab"></div><h3>Download</h3><button class="mi" data-k="audio">${ic('music')}Audio (MP3)${DLX[t.id] && DLX[t.id].audio ? ' — downloaded' : ''}</button><button class="mi" data-k="video">${ic('film')}Video (MP4, 720p)${DLX[t.id] && DLX[t.id].video ? ' — downloaded' : ''}</button>${DLX[t.id] ? `<button class="mi" data-k="rm">${ic('trash')}Remove download</button>` : ''}`); s.onclick = e => { const b = e.target.closest('[data-k]'); if (!b) return; closeSheet(); b.dataset.k === 'rm' ? removeLocal(t.id) : download(t, b.dataset.k); }; };
+$('#npDl').onclick = () => { const t = cur(); if (!t) return; if (String(t.id).startsWith('local:')) { toast('Already on your device'); return; } if (DLX[t.id]) { const sh = sheet(`<div class="grab"></div><h3>Downloaded</h3><button class="mi" data-k="rm">${ic('trash')}Remove download</button>`); sh.onclick = e => { if (e.target.closest('[data-k]')) { closeSheet(); removeLocal(t.id); } }; return; } download(t, 'audio'); };
 $('#npRadio').onclick = () => { const t = cur(); if (t) { closeNP(); setTimeout(() => go('list/radio:' + t.id), 50); } };
 $('#npShare').onclick = () => cur() && shareTrack(cur());
 $('#npQueue').onclick = openQueue;
