@@ -212,3 +212,26 @@ h3.sh{font-size:20px;margin:26px 0 12px;letter-spacing:-.2px}
 .steps pre{background:#111;border:1px solid #444;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#fff;margin:8px 0}
 /* audio-only: the Song/Video switch is gone */
 #npMode{display:none}
+.lyr-h{margin:0 0 12px;font-size:16px}
+
+/* laptop / desktop: use the width */
+@media (min-width: 900px){
+  #view{max-width:1180px;padding-left:40px;padding-right:40px}
+  .top h1{font-size:30px}
+  .quick{grid-template-columns:repeat(3,1fr);gap:12px}
+  .qi{height:64px}.qi img,.qi .cov{width:64px;height:64px}
+  .shelf{margin:0;padding:0 0 6px;gap:20px}
+  .card{width:180px}.card .cov{width:180px;height:180px}
+  .genres{grid-template-columns:repeat(4,1fr)}
+  .lh{flex-direction:row;align-items:flex-end;gap:28px;padding:72px 40px 24px;margin:-12px -40px 8px}
+  .lh .bigcov{width:232px;height:232px;flex:none}
+  .lh-info h2{font-size:44px}
+  .lh-act{align-self:auto}
+  #mini{max-width:1000px;height:72px}
+  #miniArt{width:52px;height:52px}
+  .row:hover{background:#ffffff0d;border-radius:6px}
+  #np{padding-top:24px}
+  #np>*{max-width:640px}
+  .sheet{max-width:560px;border-radius:14px;bottom:24px}
+  #toast{bottom:120px}
+}

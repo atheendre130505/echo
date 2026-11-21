@@ -67,8 +67,8 @@ const P = {
 const ic = n => { const [k, d] = P[n]; return `<svg class="${k}" viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`; };
 
 /* ───────────────────────── state ───────────────────────── */
-const S = Object.assign({ ytKey: '', geniusToken: '', preferLocal: true, autoplay: true, autoDl: true, mode: 'audio' }, store.get('settings', {}));
-delete S.cobaltUrl; delete S.cobaltKey;
+const S = Object.assign({ ghToken: '', wifiOnly: true, preferLocal: true, autoplay: true, autoDl: true, mode: 'audio' }, store.get('settings', {}));
+for (const k of ['cobaltUrl', 'cobaltKey', 'dlVia', 'geniusToken', 'ytKey']) delete S[k];
 // Settings (incl. keys) are written to localStorage AND IndexedDB, and the browser is asked to keep storage persistent.
 const saveS = () => { store.set('settings', S); try { idb.kvSet('settings', JSON.parse(JSON.stringify(S))).catch(() => {}); navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {} };
 const META = store.get('meta', {});
@@ -142,7 +142,7 @@ function logEv(k, t) {
   if (!t || String(t.id).startsWith('local:') && k !== 'play') return;
   EV.push({ i: t.id, a: akey(t.artist), k, t: Date.now() });
   if (EV.length > 5000) EV.splice(0, EV.length - 5000);
-  store.set('ev', EV); PROF = null;
+  store.set('ev', EV); PROF = null; scheduleSync(20000);
 }
 function profile() {
   if (PROF) return PROF;
@@ -318,26 +318,17 @@ async function fetchMix(id) {
   });
 }
 async function relatedViaApi(id) {
-  const t = META[id]; if (!S.ytKey || !t) return [];
-  try { return (await ytSearch(primaryArtist(t.artist) + ' songs', true)).map(x => x.id).filter(x => x !== id); } catch { return []; }
+  const t = META[id]; if (!t) return [];
+  try { return (await ytSearch(primaryArtist(t.artist) + ' songs')).map(x => x.id).filter(x => x !== id); } catch { return []; }
 }
-async function ytSearch(q, quiet) {
+async function ytSearch(q) {
   const ck = 's:' + q.toLowerCase().trim();
   const c = store.get(ck);
   if (c && Date.now() - c.at < 7 * DAY) return c.ids.map(i => META[i]).filter(Boolean);
-  let ts;
-  if (!S.ytKey) {
-    ts = (await jinaSearch(q)).map(v => { const t = trackFrom(v.id, v.title, v.ch); if (v.dur) t.dur = v.dur; return t; });
-    saveMeta(); store.set(ck, { at: Date.now(), ids: ts.map(t => t.id) }); return ts;
-  }
-  const u = 'https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoEmbeddable=true&videoCategoryId=10&maxResults=25&q=' + encodeURIComponent(q) + '&key=' + encodeURIComponent(S.ytKey);
-  const r = await fetch(u); const j = await r.json();
-  if (j.error) throw new Error(j.error.message || 'YouTube API error');
-  ts = (j.items || []).filter(it => it.id && it.id.videoId).map(it => trackFrom(it.id.videoId, it.snippet.title, it.snippet.channelTitle));
-  store.set(ck, { at: Date.now(), ids: ts.map(t => t.id) });
+  const ts = (await jinaSearch(q)).map(v => { const t = trackFrom(v.id, v.title, v.ch); if (v.dur && !t.dur) t.dur = v.dur; return t; });
+  saveMeta(); store.set(ck, { at: Date.now(), ids: ts.map(t => t.id) });
   return ts;
 }
-
 /* Keyless YouTube search: the Jina reader renders youtube.com/results and returns it as text. */
 const parseDur = s => s ? String(s).split(':').reduce((a, b) => a * 60 + +b, 0) : 0;
 async function jinaSearch(q) {
@@ -753,98 +744,22 @@ function toggleLike(t) {
   if (!t) return;
   if (likeSet.has(t.id)) { likeSet.delete(t.id); LIKES.splice(LIKES.indexOf(t.id), 1); toast('Removed from Liked Songs'); }
   else { likeSet.add(t.id); LIKES.push(t.id); toast('Added to Liked Songs'); }
-  store.set('likes', LIKES); PROF = null; renderLike();
+  store.set('likes', LIKES); noteLike(t.id, likeSet.has(t.id)); PROF = null; renderLike();
   if (route().name === 'list' && route().arg === 'liked') renderView();
 }
 
-/* ───────────────────────── lyrics + meaning ─────────────────────────
-   Lyrics: Genius (official embed script), meaning: Genius API song
-   description + line-by-line annotations. Synced lyrics: lrclib.net. */
-const LY = { id: null, tab: 'lyrics', genius: null, lines: null, synced: null, plain: null, about: null, refs: null, status: {} };
-$$('.lyr-tabs button').forEach(b => b.onclick = () => { LY.tab = b.dataset.lt; $$('.lyr-tabs button').forEach(x => x.classList.toggle('on', x === b)); renderLyrics(); });
+/* ───────────────────────── lyrics ─────────────────────────
+   From lrclib.net (free, no key): time-synced lines that follow the song when
+   available (tap a line to jump there), plain lyrics otherwise. */
+const LY = { id: null, synced: null, plain: null, status: 'loading' };
 const cleanForSearch = s => String(s).replace(/\s*[\(\[].*?[\)\]]/g, '').replace(/\s+(ft|feat|featuring)\.?\s.*$/i, '').replace(/["“”]/g, '').trim();
 async function loadLyrics(t) {
-  Object.assign(LY, { id: t.id, genius: null, lines: null, synced: null, plain: null, about: null, refs: null, status: { lyrics: 'loading', synced: 'loading', meaning: 'loading' } });
-  renderLyrics();
-  if (String(t.id).startsWith('local:')) { LY.status = { lyrics: 'none', synced: 'none', meaning: 'none' }; renderLyrics(); return; }
+  Object.assign(LY, { id: t.id, synced: null, plain: null, status: 'loading' }); renderLyrics();
+  if (String(t.id).startsWith('local:')) { LY.status = 'none'; renderLyrics(); return; }
   const id = t.id;
-  // lrclib (no key needed)
-  lrclib(t).then(r => { if (LY.id !== id) return; LY.synced = r.synced; LY.plain = r.plain; LY.status.synced = r.synced ? 'ok' : 'none'; if (!S.geniusToken) LY.status.lyrics = r.plain ? 'ok' : 'none'; renderLyrics(); })
-    .catch(() => { if (LY.id !== id) return; LY.status.synced = 'none'; if (!S.geniusToken) LY.status.lyrics = 'none'; renderLyrics(); });
-  if (!S.geniusToken) { LY.status.meaning = 'notoken'; renderLyrics(); return; }
-  try {
-    const g = await geniusFind(t); if (LY.id !== id) return;
-    if (!g) { LY.status.lyrics = LY.plain ? 'ok' : (LY.status.synced === 'loading' ? 'wait' : 'none'); LY.status.meaning = 'none'; renderLyrics(); return; }
-    LY.genius = g; renderLyrics();
-    geniusLyrics(g.id).then(lines => { if (LY.id !== id) return; LY.lines = lines; LY.status.lyrics = lines && lines.length ? 'ok' : (LY.plain ? 'ok' : 'none'); renderLyrics(); })
-      .catch(() => { if (LY.id !== id) return; LY.status.lyrics = LY.plain ? 'ok' : 'none'; renderLyrics(); });
-    geniusMeaning(g.id).then(m => { if (LY.id !== id) return; LY.about = m.about; LY.refs = m.refs; LY.status.meaning = (m.about || m.refs.length) ? 'ok' : 'none'; renderLyrics(); })
-      .catch(() => { if (LY.id !== id) return; LY.status.meaning = 'none'; renderLyrics(); });
-  } catch (e) {
-    if (LY.id !== id) return;
-    LY.status.meaning = /401|invalid/i.test(e.message) ? 'badtoken' : 'none';
-    LY.status.lyrics = LY.plain ? 'ok' : 'none'; renderLyrics();
-  }
-}
-async function gapi(path) {
-  const r = await fetch('https://api.genius.com' + path + (path.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(S.geniusToken));
-  if (r.status === 401) throw new Error('401 invalid token');
-  if (!r.ok) throw new Error('genius ' + r.status);
-  return (await r.json()).response;
-}
-async function geniusFind(t) {
-  const ck = 'gen:' + t.id, c = store.get(ck);
-  if (c && Date.now() - c.at < 30 * DAY) return c.g;
-  const title = cleanForSearch(t.title), artist = primaryArtist(t.artist);
-  const res = await gapi('/search?q=' + encodeURIComponent(title + ' ' + artist));
-  const hits = (res.hits || []).filter(h => h.type === 'song').map(h => h.result);
-  const nt = norm(title), na = norm(artist);
-  let best = null, bs = -1;
-  for (const h of hits) {
-    const ht = norm(h.title), ha = norm(h.primary_artist && h.primary_artist.name) + norm(h.artist_names);
-    let s = 0;
-    if (ht === nt) s += 3; else if (ht.includes(nt) || nt.includes(ht)) s += 2;
-    if (na && ha.includes(na)) s += 3; else if (na && (norm(t.raw || '').includes(norm(h.primary_artist && h.primary_artist.name)))) s += 2;
-    if (/translation|romanized|genius/i.test(h.artist_names || '')) s -= 4;
-    if (s > bs) { bs = s; best = h; }
-  }
-  const g = best && bs >= 3 ? { id: best.id, url: best.url, title: best.title, artist: best.primary_artist && best.primary_artist.name, art: best.song_art_image_thumbnail_url } : null;
-  store.set(ck, { at: Date.now(), g });
-  return g;
-}
-let embedChain = Promise.resolve();
-function geniusLyrics(songId) {
-  const ck = 'gly:' + songId; const c = store.get(ck); if (c && c.lines) return Promise.resolve(c.lines);
-  const p = embedChain.then(() => new Promise((res, rej) => {
-    // Genius's own embed script writes the lyrics with document.write — capture that output.
-    let html = ''; const orig = document.write;
-    const holder = document.createElement('div'); holder.id = 'rg_embed_link_' + songId; holder.hidden = true; document.body.appendChild(holder);
-    document.write = s => { html += s; };
-    const sc = document.createElement('script'); sc.src = 'https://genius.com/songs/' + songId + '/embed.js';
-    const done = ok => { document.write = orig; holder.remove(); sc.remove(); clearTimeout(to); ok ? res(html) : rej(new Error('embed failed')); };
-    const to = setTimeout(() => done(false), 12000);
-    sc.onload = () => done(true); sc.onerror = () => done(false);
-    document.head.appendChild(sc);
-  }));
-  embedChain = p.catch(() => {});
-  return p.then(html => {
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    const body = doc.querySelector('.rg_embed_body') || doc.body;
-    body.querySelectorAll('script,style,link,iframe').forEach(n => n.remove());
-    body.querySelectorAll('br').forEach(b => b.replaceWith('\n'));
-    body.querySelectorAll('p,div').forEach(b => b.append('\n'));
-    const lines = body.textContent.split('\n').map(s => s.replace(/\s+/g, ' ').trim()).filter((s, i, a) => s || (a[i - 1] && a[i - 1].trim()));
-    while (lines.length && !lines[lines.length - 1]) lines.pop();
-    while (lines.length && !lines[0]) lines.shift();
-    if (lines.length) store.set(ck, { at: Date.now(), lines });
-    return lines;
-  });
-}
-async function geniusMeaning(songId) {
-  const [s, r] = await Promise.all([gapi('/songs/' + songId + '?text_format=plain'), gapi('/referents?song_id=' + songId + '&text_format=plain&per_page=50')]);
-  let about = s.song && s.song.description && s.song.description.plain; if (about === '?' || !about) about = '';
-  const refs = (r.referents || []).map(x => ({ fr: x.fragment, body: (x.annotations && x.annotations[0] && x.annotations[0].body && x.annotations[0].body.plain) || '' })).filter(x => x.body && x.fr);
-  return { about, refs };
+  try { const r = await lrclib(t); if (LY.id !== id) return; LY.synced = r.synced; LY.plain = r.plain; LY.status = r.synced || r.plain ? 'ok' : 'none'; }
+  catch { if (LY.id !== id) return; LY.status = 'none'; }
+  renderLyrics();
 }
 async function lrclib(t) {
   const ck = 'lrc:' + t.id, c = store.get(ck);
@@ -865,51 +780,143 @@ function parseLRC(s) {
   for (const line of s.split('\n')) { const m = [...line.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g)]; const txt = line.replace(/\[[^\]]*\]/g, '').trim(); for (const x of m) out.push({ t: +x[1] * 60 + +x[2], s: txt }); }
   return out.sort((a, b) => a.t - b.t);
 }
-function annFor(line) {
-  if (!LY.refs || line.length < 4) return -1;
-  const nl = norm(line);
-  return LY.refs.findIndex(r => { const nf = norm(r.fr); return nf.length > 3 && (nf.includes(nl) || nl.includes(nf)); });
-}
 function renderLyrics() {
-  const b = $('#lyrBody'), st = LY.status[LY.tab], g = LY.genius;
-  b.className = 'lyr-body' + (LY.tab === 'meaning' ? ' sm' : '');
-  const src = g ? `<span class="src">Source: <a href="${esc(g.url)}" target="_blank" rel="noopener">Genius — ${esc(g.title)}</a></span>` : '';
-  if (st === 'loading' || st === 'wait') { b.innerHTML = '<span class="ln" style="opacity:.6">Loading…</span>'; return; }
-  if (LY.tab === 'lyrics') {
-    if (LY.lines && LY.lines.length) {
-      b.innerHTML = LY.lines.map((l, i) => {
-        if (!l) return '<span class="ln">&nbsp;</span>';
-        if (/^\[.*\]$/.test(l)) return `<span class="sec">${esc(l.slice(1, -1))}</span>`;
-        const a = annFor(l);
-        return a >= 0 ? `<span class="ln"><span class="ann" data-a="${a}">${esc(l)}</span></span>` : `<span class="ln">${esc(l)}</span>`;
-      }).join('') + (LY.refs && LY.refs.length ? '<span class="src">Highlighted lines have explanations — tap one.</span>' : '') + src;
-      $$('.ann', b).forEach(x => x.onclick = () => showAnn(+x.dataset.a));
-    } else if (LY.plain) {
-      b.innerHTML = LY.plain.map(l => l.trim() ? `<span class="ln">${esc(l)}</span>` : '<span class="ln">&nbsp;</span>').join('') + '<span class="src">Source: lrclib.net' + (S.geniusToken ? '' : ' · add a Genius token in Settings for Genius lyrics + meanings') + '</span>';
-    } else b.innerHTML = `<span class="ln" style="opacity:.7">No lyrics found for this one.</span>${src}`;
-  } else if (LY.tab === 'synced') {
-    if (LY.synced && LY.synced.length) {
-      b.innerHTML = LY.synced.map((l, i) => `<span class="sy" data-i="${i}" data-t="${l.t}">${esc(l.s) || '♪'}</span>`).join('') + '<span class="src">Time-synced lyrics: lrclib.net · tap a line to jump</span>';
-      $$('.sy', b).forEach(x => x.onclick = () => seekTo(+x.dataset.t));
-      lastSy = -1; syncLyrics(curTime(), true);
-    } else b.innerHTML = '<span class="ln" style="opacity:.7">No time-synced lyrics for this song.</span>';
-  } else {
-    if (st === 'notoken' || st === 'badtoken') { b.innerHTML = `<p>${st === 'badtoken' ? 'Your Genius token was rejected.' : 'Song meanings come from Genius.'} Add a free Genius access token in Settings to load the story behind each song and line-by-line explanations.</p><button class="btn" id="goSet">Open Settings</button>`; $('#goSet').onclick = () => { closeNP(); openSettings(); }; return; }
-    if (st !== 'ok') { b.innerHTML = `<p>No explanation on Genius for this song yet.</p>${src}`; return; }
-    b.innerHTML = '<div class="mean">' + (LY.about ? `<h4>About this song</h4><p>${esc(LY.about)}</p>` : '') +
-      (LY.refs.length ? '<h4>What the lyrics mean</h4>' + LY.refs.map(r => `<div class="fr">“${esc(r.fr)}”</div><p>${esc(r.body)}</p>`).join('') : '') + '</div>' + src;
-  }
+  const b = $('#lyrBody'); b.className = 'lyr-body';
+  if (LY.status === 'loading') { b.innerHTML = '<span class="ln" style="opacity:.6">Loading…</span>'; return; }
+  if (LY.synced && LY.synced.length) {
+    b.innerHTML = LY.synced.map((l, i) => `<span class="sy" data-i="${i}" data-t="${l.t}">${esc(l.s) || '♪'}</span>`).join('') + '<span class="src">Lyrics: lrclib.net · tap a line to jump there</span>';
+    $$('.sy', b).forEach(x => x.onclick = () => seekTo(+x.dataset.t));
+    lastSy = -1; syncLyrics(curTime(), true);
+  } else if (LY.plain) {
+    b.innerHTML = LY.plain.map(l => l.trim() ? `<span class="ln">${esc(l)}</span>` : '<span class="ln">&nbsp;</span>').join('') + '<span class="src">Lyrics: lrclib.net</span>';
+  } else b.innerHTML = '<span class="ln" style="opacity:.7">No lyrics found for this song.</span>';
 }
 let lastSy = -1;
 function syncLyrics(t, force) {
-  if (LY.tab !== 'synced' || !LY.synced || !LY.synced.length) return;
+  if (!LY.synced || !LY.synced.length) return;
   let k = -1; for (let i = 0; i < LY.synced.length; i++) { if (LY.synced[i].t <= t + 0.25) k = i; else break; }
   if (k === lastSy && !force) return; lastSy = k;
   $$('#lyrBody .sy').forEach((el, i) => { el.classList.toggle('now', i === k); el.classList.toggle('past', i < k); });
   const el = $(`#lyrBody .sy[data-i="${k}"]`), np = $('#np');
   if (el && np.classList.contains('open')) { const r = el.getBoundingClientRect(); if (r.top < 80 || r.bottom > innerHeight - 120) np.scrollBy({ top: r.top - innerHeight * 0.4, behavior: 'smooth' }); }
 }
-function showAnn(i) { const r = LY.refs[i]; if (!r) return; sheet(`<div class="grab"></div><div class="mean small"><div class="fr">“${esc(r.fr)}”</div><p>${esc(r.body)}</p></div><span class="muted small">From Genius annotations</span>`); }
+
+/* ───────────────────────── sync: phone ⇄ laptop ─────────────────────────
+   Likes, history and playlists are merged through a private GitHub gist.
+   The laptop service downloads your songs and puts the ones this phone doesn't
+   have yet into an "inbox" in your private echo-music repo; Echo copies them
+   from there into its own storage so they play offline, reports what it has,
+   and the laptop clears them from the inbox. Needs one GitHub token (gist + repo). */
+const SYNC_DESC = 'Echo sync (private)', SYNC_FILE = 'echo-sync.json';
+const LIKE_TS = store.get('likeTs', {});            // id -> [liked 1/0, time changed]
+let LAPTOP = store.get('laptop', null);              // { name, at } — when the laptop service last checked in
+let STORE = store.get('inboxStore', null);           // { repo, inbox: { videoId: blobSha } }
+const DEV = store.get('dev') || (() => { const d = 'd' + Math.random().toString(36).slice(2, 10); store.set('dev', d); return d; })();
+const REQ = new Set(store.get('dlReq', []));          // songs this device asked the laptop to download
+let syncT = null, syncing = null;
+function noteLike(id, on) { LIKE_TS[id] = [on ? 1 : 0, Date.now()]; store.set('likeTs', LIKE_TS); scheduleSync(); }
+function scheduleSync(ms = 5000) { if (!S.ghToken) return; clearTimeout(syncT); syncT = setTimeout(syncNow, ms); }
+async function ghApi(path, opt = {}) {
+  const r = await fetch('https://api.github.com' + path, Object.assign({}, opt, { headers: Object.assign({ Authorization: 'Bearer ' + S.ghToken, Accept: 'application/vnd.github+json' }, opt.body ? { 'Content-Type': 'application/json' } : {}) }));
+  if (r.status === 401) throw new Error('GitHub token was rejected');
+  if (!r.ok) throw new Error('GitHub ' + r.status);
+  return r.json();
+}
+async function syncGist() {
+  let id = store.get('syncGist'); if (id) return id;
+  const g = (await ghApi('/gists?per_page=100')).find(x => x.description === SYNC_DESC && x.files[SYNC_FILE]);
+  id = g ? g.id : (await ghApi('/gists', { method: 'POST', body: JSON.stringify({ description: SYNC_DESC, public: false, files: { [SYNC_FILE]: { content: '{"v":1}' } } }) })).id;
+  store.set('syncGist', id); return id;
+}
+function syncNow() {
+  if (!S.ghToken) return Promise.resolve();
+  return syncing || (syncing = (async () => {
+    const gid = await syncGist();
+    const g = await ghApi('/gists/' + gid);
+    const f = g.files[SYNC_FILE] || {};
+    let text = f.content || '{}'; if (f.truncated && f.raw_url) text = await (await fetch(f.raw_url)).text();
+    let R = {}; try { R = JSON.parse(text); } catch {}
+    const before = JSON.stringify(R);
+    // likes: the newest change wins on both devices
+    for (const id of LIKES) if (!LIKE_TS[id]) LIKE_TS[id] = [1, 0];
+    for (const [id, v] of Object.entries(R.likes || {})) if (!LIKE_TS[id] || v[1] > LIKE_TS[id][1]) LIKE_TS[id] = v;
+    LIKES.length = 0; likeSet.clear();
+    Object.entries(LIKE_TS).filter(([, v]) => v[0]).sort((a, b) => a[1][1] - b[1][1]).forEach(([id]) => { LIKES.push(id); likeSet.add(id); });
+    store.set('likes', LIKES); store.set('likeTs', LIKE_TS); R.likes = LIKE_TS;
+    // history: everything from both devices
+    const key = e => e.i + '|' + e.k + '|' + e.t, have = new Set(EV.map(key));
+    for (const r of R.ev || []) { const e = { i: r[0], a: r[1], k: r[2], t: r[3] }; if (!have.has(key(e))) { EV.push(e); have.add(key(e)); } }
+    EV.sort((a, b) => a.t - b.t); if (EV.length > 5000) EV.splice(0, EV.length - 5000);
+    store.set('ev', EV); PROF = null; R.ev = EV.map(e => [e.i, e.a, e.k, e.t]);
+    // playlists: newest version of each wins (deleted ones are kept as a marker)
+    for (const [id, pl] of Object.entries(R.pl || {})) if (!PL[id] || (pl.at || 0) > (PL[id].at || 0)) PL[id] = pl;
+    store.set('pl', PL); R.pl = PL;
+    // song names so the other device can show them
+    R.meta = R.meta || {};
+    for (const [id, m] of Object.entries(R.meta)) if (!META[id]) META[id] = { id, title: m[0], artist: m[1], art: m[2] || undefined, fixed: true };
+    for (const id of new Set([...LIKES, ...EV.map(e => e.i), ...Object.values(PL).flatMap(x => x.ids || [])])) {
+      const m = META[id]; if (m && m.title && !R.meta[id] && !String(id).startsWith('local:') && !m.pending) R.meta[id] = [m.title, m.artist || '', m.art || ''];
+    }
+    saveMeta();
+    const rec = [...new Set([...store.get('recent', []), ...(R.recent || [])])].slice(0, 60); store.set('recent', rec); R.recent = rec;
+    if (R.laptop) { LAPTOP = R.laptop; store.set('laptop', LAPTOP); }
+    if (R.store) { STORE = R.store; store.set('inboxStore', STORE); }
+    // what this device already has (so the laptop can clear its inbox) and what it asked for
+    for (const id of [...REQ]) if (DLX[id]) REQ.delete(id);
+    store.set('dlReq', [...REQ]);
+    const local = await helperUp();
+    R.have = R.have || {}; R.have[DEV] = { ids: Object.keys(DLX).filter(i => /^[\w-]{11}$/.test(i)).sort(), local, at: (R.have[DEV] && R.have[DEV].at) || 0 };
+    R.req = R.req || {}; if (REQ.size) R.req[DEV] = [...REQ]; else delete R.req[DEV];
+    if (JSON.stringify(R) !== before) R.have[DEV].at = Date.now();
+    R.v = 1;
+    if (JSON.stringify(R) !== before) await ghApi('/gists/' + gid, { method: 'PATCH', body: JSON.stringify({ files: { [SYNC_FILE]: { content: JSON.stringify(R) } } }) });
+    store.set('lastSync', Date.now()); store.del('syncErr');
+    pullFromLaptop();
+  })().catch(e => { store.set('syncErr', e.message); }).finally(() => { syncing = null; }));
+}
+// songs worth keeping: liked, finished, or played without skipping (newest first)
+function wantedIds() {
+  const skipped = new Set(), played = [];
+  for (const e of EV) { if (e.k === 'skip') skipped.add(e.i); else if (e.k === 'done') { skipped.delete(e.i); played.push(e.i); } else if (e.k === 'play' || e.k === 'pick') played.push(e.i); }
+  return [...new Set([...LIKES.slice().reverse(), ...played.reverse().filter(i => !skipped.has(i))])].filter(i => /^[\w-]{11}$/.test(i));
+}
+const onWifi = () => { const c = navigator.connection; return !c || !c.type || c.type === 'wifi' || c.type === 'ethernet'; };
+const inInbox = id => !!(STORE && STORE.inbox && STORE.inbox[id]);
+async function pullFromLaptop() {
+  if (!S.autoDl || (S.wifiOnly && !onWifi())) return;
+  const local = await helperUp();
+  let n = 0;
+  for (const id of new Set([...REQ, ...wantedIds()])) {
+    if (DLX[id]) continue;
+    const t = META[id] || { id, title: 'Song', artist: '' };
+    if (local ? queueDl(t) : inInbox(id) && queueInbox(t)) n++;
+    if (n >= 300) break;
+  }
+  if (n && !store.get('pullNoted')) { store.set('pullNoted', 1); toast(`Copying ${n} songs ${local ? 'from your downloader' : 'from your laptop'} so they play offline`); }
+}
+// Songs from the laptop's inbox in your private GitHub repo, one at a time, into Echo's storage.
+const inQ = []; let inBusy = false;
+function queueInbox(t) {
+  if (!t || DLX[t.id] || !inInbox(t.id) || inQ.some(x => x.id === t.id)) return false;
+  inQ.push(t); runInbox(); return true;
+}
+async function runInbox() {
+  if (inBusy) return; inBusy = true; let got = 0;
+  try {
+    while (inQ.length) {
+      const t = inQ.shift(); if (DLX[t.id] || !inInbox(t.id)) continue;
+      try {
+        const r = await fetch(`https://api.github.com/repos/${STORE.repo}/git/blobs/${STORE.inbox[t.id]}`, { headers: { Authorization: 'Bearer ' + S.ghToken, Accept: 'application/vnd.github.raw+json' } });
+        if (!r.ok) continue;
+        await saveLocal(t, 'audio', new Blob([await r.arrayBuffer()], { type: 'audio/mpeg' }));
+        got++;
+      } catch {}
+    }
+  } finally {
+    inBusy = false;
+    if (got) { scheduleSync(3000); if (route().arg === 'dl') renderView(); }
+  }
+}
 
 /* ───────────────────────── downloads ─────────────────────────
    Downloads run through echo_dl.py (yt-dlp) on your own phone or computer.
@@ -930,45 +937,65 @@ const idb = (() => {
 const HELPER = 'http://127.0.0.1:8977';
 const SETUP_CMD = `curl -fsSL ${location.origin}${location.pathname.replace(/[^/]*$/, '')}setup.sh | bash`;
 async function helperUp() {
-  try { const c = new AbortController(); setTimeout(() => c.abort(), 1500); const r = await fetch(HELPER + '/ping', { signal: c.signal }); return r.ok && (await r.json()).app === 'echo-dl'; } catch { return false; }
+  try {
+    const c = new AbortController(); setTimeout(() => c.abort(), 1500);
+    const r = await fetch(HELPER + '/ping', { signal: c.signal });
+    const ok = r.ok && (await r.json()).app === 'echo-dl';
+    if (ok) store.set('helperSeen', 1);
+    return ok;
+  } catch { return false; }
 }
-/* Simple way: hand the song to Seal, a free Android app (yt-dlp inside, converts to MP3).
-   No setup beyond installing it; Echo opens the share sheet with the song's link. */
-async function shareToSeal(t) {
-  const url = 'https://www.youtube.com/watch?v=' + t.id;
-  S.dlVia = 'seal'; saveS();
-  if (navigator.share) {
-    try { await navigator.share({ title: `${t.title} — ${t.artist}`, url }); toast('Pick Seal → Audio → Download. The MP3 goes to Download/Seal.', 5000); }
-    catch (e) { if (e.name !== 'AbortError') toast("Couldn't open the share menu"); }
-  } else { navigator.clipboard.writeText(url).then(() => toast('Link copied — paste it into Seal')); }
+/* Starting the downloader for you: a web page can't run commands, but it can open an app.
+   Echo opens Termux; the line the setup added to Termux's startup starts the downloader.
+   Press Back and Echo carries on as soon as the downloader answers. It then keeps running
+   in the background (Termux holds a wake lock) until the phone restarts. */
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+const TERMUX_INTENT = 'intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=com.termux;S.browser_fallback_url=' + encodeURIComponent('https://f-droid.org/packages/com.termux/') + ';end';
+// Downloads on this device go through its own downloader (Termux on the phone, the laptop service on the laptop).
+async function helperBase() {
+  return (await helperUp()) ? { base: HELPER, key: '', remote: false } : null;
+}
+// No downloader here but a laptop is synced: ask the laptop to fetch it; it arrives through the inbox.
+function askLaptop(t) {
+  if (inInbox(t.id)) { queueInbox(t); toast(`Copying “${t.title}” from your laptop…`); return; }
+  REQ.add(t.id); store.set('dlReq', [...REQ]); scheduleSync(500);
+  toast(`Your laptop will download “${t.title}”. It'll be here in a few minutes, playable offline.`, 4500);
+}
+let starting = null;
+function startHelper() {
+  return starting || (starting = (async () => {
+    if (await helperUp()) return true;
+    if (!IS_ANDROID || !store.get('helperSeen')) return false;   // not set up on this phone yet
+    const tn = toast('Opening Termux to start the downloader. Press Back to return.', 0);
+    location.href = TERMUX_INTENT;
+    for (let i = 0; i < 60; i++) {
+      await sleep(1000);
+      if (await helperUp()) { tn.set('Downloader is running'); tn.hide(1500); return true; }
+    }
+    tn.set("The downloader didn't start. Open Termux once, then try again."); tn.hide(5000);
+    return false;
+  })().finally(() => { starting = null; }));
 }
 function helperSetup(t, kind) {
-  const s = sheet(`<div class="grab"></div><h3>Download as MP3</h3>
-    <p class="muted small">A website can't save YouTube audio by itself, so a small app on your phone does it. Pick one (once):</p>
-    <h4 style="margin:16px 0 4px">Easy: Seal app <span class="muted small">(no setup)</span></h4>
+  const s = sheet(`<div class="grab"></div><h3>Turn on downloads (one time)</h3>
+    <p class="muted small">A website can't save YouTube audio by itself, so a small Python downloader (yt-dlp) runs inside <b>Termux</b> on your phone and saves each song as MP3 to <b>Downloads/Echo</b>. Songs also play offline here.</p>
     <ol class="steps">
-      <li>Install <b>Seal</b> from <a href="https://f-droid.org/packages/com.junkfood.seal/" target="_blank" rel="noopener">F-Droid</a> or its <a href="https://github.com/JunkFood02/Seal/releases/latest" target="_blank" rel="noopener">GitHub page</a> (YouTube downloaders aren't allowed on the Play Store). It's free and open source.</li>
-      <li>Tap Download in Echo, pick <b>Seal</b> in the share menu, choose <b>Audio</b>, tap Download. Seal converts it to MP3 and saves it to <b>Download/Seal</b>.</li>
-      <li>Optional: add the files to Echo with <b>Library → Downloads → Import</b> to play them offline here.</li>
+      <li>Install <b>Termux</b> from <a href="https://f-droid.org/packages/com.termux/" target="_blank" rel="noopener">F-Droid</a> (the Play Store version is outdated).</li>
+      <li>Open Termux, paste this, press Enter, and tap Allow when it asks for storage:<pre id="cmd">${esc(SETUP_CMD)}</pre><button class="btn ghost" id="cpy">Copy command</button></li>
+      <li>Come back here and tap <b>Try again</b>.</li>
     </ol>
-    ${t && t.id ? '<div class="bar"><button class="btn acc" id="seal">Share this song to Seal</button></div>' : ''}
-    <h4 style="margin:22px 0 4px">Automatic: Termux helper <span class="muted small">(one command)</span></h4>
-    <p class="muted small">Downloads every song you listen to by itself and keeps it inside Echo for offline and background play.</p>
-    <ol class="steps">
-      <li>Install <b>Termux</b> from <a href="https://f-droid.org/packages/com.termux/" target="_blank" rel="noopener">F-Droid</a>.</li>
-      <li>Open it, paste this, press Enter, tap Allow when asked:<pre id="cmd">${esc(SETUP_CMD)}</pre><button class="btn ghost" id="cpy">Copy command</button></li>
-      <li>Leave Termux running in the background, then tap <b>Try again</b>.</li>
-    </ol>
-    <div class="bar"><button class="btn ghost" id="retry">Try again</button></div>`);
-  const sb = $('#seal', s); if (sb) sb.onclick = () => { closeSheet(); shareToSeal(t); };
+    <p class="muted small">That's the only setup. After this, when you tap Download and the downloader isn't running, Echo opens Termux for you. It starts by itself: just press Back.</p>
+    <p class="muted small"><b>Easier: use your laptop.</b> If your laptop runs the Echo laptop service, just add your GitHub token in Settings → Sync on this phone. The laptop downloads everything you like or play, and the phone copies the songs in by itself.</p>
+    <div class="bar"><button class="btn acc" id="retry">Try again</button></div>`);
   $('#cpy', s).onclick = () => navigator.clipboard.writeText(SETUP_CMD).then(() => toast('Copied — paste it in Termux'));
-  $('#retry', s).onclick = () => { closeSheet(); if (t && t.id) download(t, kind); };
+  $('#retry', s).onclick = () => { closeSheet(); if (t && t.id) download(t, kind); else downloadHistory(); };
 }
 async function download(t, kind, quiet) {
-  if (!(await helperUp())) { if (!quiet) (S.dlVia === 'seal' ? shareToSeal(t) : helperSetup(t, kind)); return; }
-  const tn = quiet ? { set() {}, hide() {} } : toast(`Downloading “${t.title}” on your phone…`, 0);
+  let hb = await helperBase();
+  if (!hb) { if (quiet) return; if (S.ghToken && LAPTOP) { askLaptop(t); return; } if (await startHelper()) hb = { base: HELPER, key: '' }; else { helperSetup(t, kind); return; } }
+  const tn = quiet ? { set() {}, hide() {} } : toast(hb.remote ? `Getting “${t.title}” from your laptop…` : `Downloading “${t.title}” on your phone…`, 0);
   try {
-    const r = await fetch(`${HELPER}/download?id=${encodeURIComponent(t.id)}&kind=${kind}`);
+    const r = await fetch(`${hb.base}/download?id=${encodeURIComponent(t.id)}&kind=${kind}${hb.key ? '&key=' + encodeURIComponent(hb.key) : ''}`);
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'helper ' + r.status); }
     const total = +r.headers.get('content-length') || 0, reader = r.body.getReader(), chunks = []; let got = 0;
     for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.length; tn.set(`Saving into Echo · ${total ? Math.round(got / total * 100) + '%' : (got / 1048576).toFixed(1) + ' MB'}`, total ? got / total : null); }
@@ -987,14 +1014,17 @@ async function runDl() {
   if (dlBusy) return; dlBusy = true;
   try {
     while (dlQ.length) {
-      if (!(await helperUp())) { dlQ.length = 0; break; }
+      if (!(await helperBase())) { dlQ.length = 0; break; }
       const t = dlQ.shift(); if (!DLX[t.id]) await download(t, 'audio', true).catch(() => {});
     }
   } finally { dlBusy = false; if (route().arg === 'dl') renderView(); }
 }
 async function downloadHistory() {
-  if (!(await helperUp())) { helperSetup(cur() || {}, 'audio'); return; }
-  const ids = [...new Set([...LIKES.slice().reverse(), ...EV.filter(e => e.k === 'done' || e.k === 'play').reverse().map(e => e.i)])];
+  if (!(await helperBase())) {
+    if (S.ghToken && LAPTOP) { await syncNow(); pullFromLaptop(); toast('Copying everything from your laptop. New songs arrive as the laptop downloads them.', 4500); return; }
+    if (!(await startHelper())) { helperSetup(null, 'audio'); return; }
+  }
+  const ids = wantedIds();
   let n = 0; for (const id of ids) { const t = META[id]; if (t && isVerified(t) && queueDl(t)) n++; }
   toast(n ? `Downloading ${n} songs in the background` : 'Everything you listened to is already downloaded');
 }
@@ -1057,7 +1087,7 @@ function trackMenu(t, opts = {}) {
 }
 function shareTrack(t) { const url = 'https://www.youtube.com/watch?v=' + t.id; if (navigator.share) navigator.share({ title: t.title + ' — ' + t.artist, url }).catch(() => {}); else navigator.clipboard.writeText(url).then(() => toast('Link copied')); }
 function addToPlaylist(t) {
-  const items = Object.entries(PL).sort((a, b) => b[1].at - a[1].at);
+  const items = Object.entries(PL).filter(([, p]) => !p.del).sort((a, b) => b[1].at - a[1].at);
   const s = sheet(`<div class="grab"></div><h3>Add to playlist</h3><button class="mi" data-new="1">${ic('plus')}New playlist</button>` + items.map(([id, p]) => `<button class="mi" data-id="${esc(id)}">${ic('music')}${esc(p.name)} <span class="muted small">· ${p.ids.length}</span></button>`).join(''));
   s.onclick = e => {
     const b = e.target.closest('button'); if (!b) return;
@@ -1087,12 +1117,10 @@ function openSettings() {
     <label for="sCc">Country for charts and new releases</label>
     <input type="text" id="sCc" value="${esc(CC())}" maxlength="2" placeholder="in" autocomplete="off">
     <div class="help">Two-letter code, e.g. in, us, gb.</div>
-    <label for="sYt">YouTube Data API key (optional)</label>
-    <input type="password" id="sYt" value="${esc(S.ytKey)}" placeholder="AIza…" autocomplete="off">
-    <div class="help">Free: <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">enable YouTube Data API v3</a>, then Credentials → Create API key. Not needed: search already works without it. A key only makes YouTube results appear faster (~100 searches/day).</div>
-    <label for="sGe">Genius access token (lyrics + meanings)</label>
-    <input type="password" id="sGe" value="${esc(S.geniusToken)}" placeholder="Client access token" autocomplete="off">
-    <div class="help">Free: <a href="https://genius.com/api-clients" target="_blank" rel="noopener">genius.com/api-clients</a> → New API Client (any URL) → Generate Access Token. Without it, lyrics come from lrclib only.</div>
+    <label for="sGh">Sync with your laptop (GitHub token)</label>
+    <input type="password" id="sGh" value="${esc(S.ghToken)}" placeholder="ghp_…" autocomplete="off">
+    <div class="help"><a href="https://github.com/settings/tokens/new?scopes=gist,repo&description=Echo" target="_blank" rel="noopener">Create a token</a> (the <b>gist</b> and <b>repo</b> boxes are pre-ticked; pick "No expiration"), then paste it here, once per device. Likes, history and playlists sync through a private gist, and songs your laptop downloads are copied onto this device so they play offline. <span id="syncSt"></span></div>
+    <div class="tog"><span>Copy songs from the laptop only on Wi-Fi</span><input type="checkbox" id="sWifi" ${S.wifiOnly ? 'checked' : ''}></div>
     <label>Downloads</label>
     <div class="help" id="hlp">Checking the download helper…</div>
     <div class="tog"><span>Autoplay similar songs when the queue ends</span><input type="checkbox" id="sAuto" ${S.autoplay ? 'checked' : ''}></div>
@@ -1101,14 +1129,16 @@ function openSettings() {
     <div class="bar"><button class="btn acc" id="sSave">Save</button><button class="btn ghost" id="sExp">Back up data</button><label class="btn ghost" style="margin:0;color:var(--tx)">Restore<input type="file" id="sImp" accept="application/json" hidden></label></div>
     <div class="bar"><button class="btn ghost" id="sRe">Refresh recommendations</button><button class="btn ghost" id="sClr">Clear listening history</button></div>
     <label>Keep your keys safe</label>
-    <div class="help">Keys are saved on this phone permanently (in two places, and the browser is asked not to clear them). If the browser's data ever gets wiped, open your restore link once and everything comes back. It's a private link, so keep it to yourself (e.g. in your notes).</div>
+    <div class="help">Your token is saved on this device permanently (in two places, and the browser is asked not to clear them). If the browser's data ever gets wiped, open your restore link once and everything comes back. It's a private link, so keep it to yourself (e.g. in your notes).</div>
     <div class="bar"><button class="btn ghost" id="sLink">Copy restore link</button></div>
-    <p class="help" style="margin-top:18px">Everything (history, likes, playlists, keys) stays on this device. Echo is not affiliated with YouTube, Spotify or Genius.</p>`);
-  helperUp().then(ok => { const h = $('#hlp'); if (h) h.innerHTML = ok ? '✓ Download helper is running. Downloads are saved to Downloads/Echo.' : (S.dlVia === 'seal' ? 'Download sends songs to the Seal app (MP3 in Download/Seal). ' : 'No download app set up yet. ') + '<a href="#" id="dlOpt">Download options</a>'; const o = $('#dlOpt'); if (o) o.onclick = e => { e.preventDefault(); helperSetup(null, 'audio'); }; });
-  $('#sLink', s).onclick = () => { const keys = { ytKey: S.ytKey, geniusToken: S.geniusToken, country: S.country }; navigator.clipboard.writeText(location.origin + location.pathname + '#restore=' + btoa(unescape(encodeURIComponent(JSON.stringify(keys))))).then(() => toast('Restore link copied')); };
+    <p class="help" style="margin-top:18px">Your history, likes, playlists and keys stay on your devices and your own private gist. Echo is not affiliated with YouTube or Spotify.</p>`);
+  helperUp().then(ok => { const h = $('#hlp'); if (h) h.innerHTML = ok ? '✓ Downloader is running on this device. Songs are saved to Downloads/Echo (Music/Echo on the laptop).' : S.ghToken && LAPTOP ? 'Songs come from your laptop: it downloads everything you like or play, and this device copies them in by itself. ' + '<a href="#" id="dlOpt">Other options</a>' : (store.get('helperSeen') ? 'Downloader not running right now. Tapping Download opens Termux to start it; press Back to return. ' : 'Downloads are not set up yet. ') + '<a href="#" id="dlOpt">Download setup</a>'; const o = $('#dlOpt'); if (o) o.onclick = e => { e.preventDefault(); helperSetup(null, 'audio'); }; });
+  { const st = $('#syncSt'), last = store.get('lastSync'), err = store.get('syncErr');
+    if (st && S.ghToken) st.innerHTML = '<br>' + (err ? '⚠ ' + esc(err) : last ? '✓ Synced ' + new Date(last).toLocaleString() : 'Not synced yet') + (LAPTOP ? ` · laptop ${esc(LAPTOP.name || '')} last checked in ${new Date(LAPTOP.at).toLocaleString()}` : '') + (STORE && STORE.inbox ? ` · ${Object.keys(STORE.inbox).filter(i => !DLX[i]).length} songs waiting to copy` : ''); }
+  $('#sLink', s).onclick = () => { const keys = { ghToken: S.ghToken, country: S.country }; navigator.clipboard.writeText(location.origin + location.pathname + '#restore=' + btoa(unescape(encodeURIComponent(JSON.stringify(keys))))).then(() => toast('Restore link copied')); };
   $('#sSave', s).onclick = () => {
-    S.country = ($('#sCc').value.trim().toLowerCase().match(/^[a-z]{2}$/) || [''])[0]; S.ytKey = $('#sYt').value.trim(); S.geniusToken = $('#sGe').value.trim();
-    S.autoplay = $('#sAuto').checked; S.preferLocal = $('#sLoc').checked; S.autoDl = $('#sAdl').checked; saveS(); closeSheet(); toast('Saved'); if (cur()) loadLyrics(cur()); renderView();
+    S.country = ($('#sCc').value.trim().toLowerCase().match(/^[a-z]{2}$/) || [''])[0]; S.ghToken = $('#sGh').value.trim(); S.wifiOnly = $('#sWifi').checked;
+    S.autoplay = $('#sAuto').checked; S.preferLocal = $('#sLoc').checked; S.autoDl = $('#sAdl').checked; saveS(); closeSheet(); toast('Saved'); if (S.ghToken) { store.del('syncErr'); syncNow().then(() => { const e = store.get('syncErr'); toast(e ? 'Sync: ' + e : 'Synced with your other devices'); renderView(); }); } renderView();
   };
   $('#sExp', s).onclick = () => {
     const data = {}; for (const k of store.keys()) if (!/^(mix|s|gen|gly|lrc|chart|rr):/.test(k)) data[k] = store.get(k);
@@ -1262,7 +1292,7 @@ function viewSearch(q = '') {
   if (q) show(q, true); else browse();
 }
 function viewLibrary() {
-  const pls = Object.entries(PL).sort((a, b) => b[1].at - a[1].at);
+  const pls = Object.entries(PL).filter(([, p]) => !p.del).sort((a, b) => b[1].at - a[1].at);
   const nd = Object.keys(DLX).length;
   V.innerHTML = `<div class="top"><h1>Your Library</h1><div><button class="ib" id="lNew" aria-label="New playlist">${ic('plus')}</button><button class="ib" id="gear" aria-label="Settings">${ic('gear')}</button></div></div>
     <div id="ll">
@@ -1288,7 +1318,7 @@ async function resolveList(key) {
     const g = key.slice(6), ts = await chart(g), gc = GENRES.find(x => x[0] === +g);
     return { title: +g ? genreName(g) + ' — Top songs' : 'Top 50 — ' + countryName(), sub: 'Most popular in ' + countryName() + ' right now · updated daily', ids: ts.map(t => t.id), hc: gc ? gc[2] : '#1e3264' };
   }
-  if (key.startsWith('pl:')) { const p = PL[key.slice(3)]; return p ? { title: p.name, sub: p.ids.length + ' songs', ids: p.ids.slice(), plId: key.slice(3) } : null; }
+  if (key.startsWith('pl:')) { const p = PL[key.slice(3)]; return p && !p.del ? { title: p.name, sub: p.ids.length + ' songs', ids: p.ids.slice(), plId: key.slice(3) } : null; }
   if (key.startsWith('radio:')) {
     const id = key.slice(6), seed = await meta(id).catch(() => null); if (!seed) return null;
     const list = await radioFor(seed);
@@ -1316,7 +1346,7 @@ async function viewList(key) {
   bindRows($('#lt'), tracks, L.title, key, { plId: L.plId, radio: key.startsWith('chart:') });
   const imp = $('#imp'); if (imp) imp.onchange = e => importFiles(e.target.files);
   const da = $('#dlAll'); if (da) da.onclick = downloadHistory;
-  const pd = $('#plDel'); if (pd) pd.onclick = () => { if (confirm('Delete “' + L.title + '”?')) { delete PL[L.plId]; store.set('pl', PL); go('library'); } };
+  const pd = $('#plDel'); if (pd) pd.onclick = () => { if (confirm('Delete “' + L.title + '”?')) { PL[L.plId] = { name: L.title, ids: [], at: Date.now(), del: true }; store.set('pl', PL); scheduleSync(); go('library'); } };
   const rr = $('#reroll'); if (rr) rr.onclick = () => { if (key.startsWith('radio:')) { store.del('mix:' + key.slice(6)); viewList(key); } else { HOME = null; store.del('home'); go('home'); toast('Rebuilding your mixes…'); } };
 }
 function renderView() {
@@ -1363,17 +1393,20 @@ pruneCache();
 (() => {
   const m = location.hash.match(/^#restore=(.+)$/);
   if (m) {
-    try { const k = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); for (const f of ['ytKey', 'geniusToken', 'country']) if (k[f]) S[f] = k[f]; saveS(); setTimeout(() => toast('Your keys are restored'), 300); } catch {}
+    try { const k = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); for (const f of ['ghToken', 'country']) if (k[f]) S[f] = k[f]; saveS(); setTimeout(() => toast('Your keys are restored'), 300); } catch {}
     history.replaceState(null, '', location.pathname + '#home');
   }
 })();
 idb.kvGet('settings').then(saved => {
   const hasLocal = !!localStorage.getItem('echo:settings');
-  if (saved && (!hasLocal || (!S.geniusToken && saved.geniusToken) || (!S.ytKey && saved.ytKey))) {
-    for (const f of ['ytKey', 'geniusToken', 'country']) if (!S[f] && saved[f]) S[f] = saved[f];
+  if (saved && (!hasLocal || (!S.ghToken && saved.ghToken))) {
+    for (const f of ['ghToken', 'country']) if (!S[f] && saved[f]) S[f] = saved[f];
     store.set('settings', S); if (cur()) loadLyrics(cur()); renderView();
   } else if (hasLocal) saveS();
 }).catch(() => {});
 renderView();
 renderLyrics();
+// sync on start, every 3 minutes, and when the app goes to the background
+setTimeout(syncNow, 1500); setInterval(syncNow, 3 * 60e3);
+document.addEventListener('visibilitychange', () => { if (document.hidden) syncNow(); else scheduleSync(500); });
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

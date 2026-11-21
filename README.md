@@ -1,14 +1,14 @@
 # Echo
 
-A phone-first music player (audio only) that uses YouTube for its catalog. It runs as a static site on GitHub Pages. There is no server and no account; everything is stored on your phone.
+A phone-first music player (audio only) that uses YouTube for its catalog. It runs as a static site on GitHub Pages, on your phone and your laptop. Your data stays on your devices and in your own private GitHub storage.
 
 - **Song catalog**: tens of thousands of songs with their YouTube IDs (see below). Searches hit it instantly, and those songs play straight away.
-- **Search with no keys**: catalog results first, then Apple's music catalog, then YouTube results a few seconds later. Tap any song and Echo finds the right upload and plays it.
+- **Search, no keys**: catalog results first, then Apple's music catalog. Tap any song and Echo finds the right upload and plays it.
 - **New music without searching**: "Trending in your country", daily charts for 16 genres (Bollywood, Tamil, Telugu, Indian Pop, Pop, Hip-Hop, K-Pop…), and **Release Radar**, which shows new songs from artists you listen to.
 - **Home**: Daily Mixes, Discover Weekly, On Repeat, Jump back in, Recently played and radios for your top artists.
 - **Player**: audio only, with shuffle, repeat, a queue, and autoplay radio when the queue runs out. When there's a choice, Echo picks the plain audio upload over the music video.
-- **Lyrics**: full lyrics from Genius, karaoke-style synced lyrics from lrclib, and a **Meaning** tab with Genius's "About this song" text and line-by-line explanations. Highlighted lyric lines can be tapped for their explanation.
-- **Downloads**: MP3 audio through a Python script (yt-dlp) running on your phone. **Every song you listen to past 30 seconds is downloaded automatically**, and Library → Downloads has a button to download everything you've listened to. Files go to Downloads/Echo; downloaded songs play offline and in the background.
+- **Lyrics** from lrclib: time-synced lines that follow the song (tap one to jump there) when available, plain lyrics otherwise.
+- **Phone + laptop**: likes, history and playlists sync between devices. Your laptop downloads every song you like or play as MP3, and Echo on your phone copies them into its own storage, so they **play offline, instantly, even with the screen locked**.
 - **Library**: Liked Songs, playlists, Downloads (you can also import any audio/video file) and History. It also has backup and restore.
 
 ## Only songs
@@ -73,41 +73,30 @@ Discover Weekly only includes artists you have never played, and it stays the sa
 
 When you change a file later, increase the `?v=2` in `index.html` so phones load the new version.
 
-## Free keys (paste them in ⚙ Settings inside the app)
+## Phone + laptop: sync and offline songs
 
-| What | Why | Where |
-|---|---|---|
-| YouTube Data API key *(optional)* | Makes YouTube video results appear faster. Search already works without it. | console.cloud.google.com, then enable **YouTube Data API v3**, then **Credentials → Create API key**. Restrict it to `https://<you>.github.io/*`. |
-| Genius access token | Genius lyrics and song meanings | genius.com/api-clients, then **New API Client** (any URL), then **Generate Access Token** |
-Search, charts, playback, Mixes, radio, recommendations and synced lyrics need **no keys**. Keyless YouTube search goes through the free Jina reader (r.jina.ai), which allows about 20 searches a minute.
+The only key in Echo is one **GitHub token**. You enter it once per device in ⚙ Settings → Sync; the link there opens GitHub's token page with **gist** and **repo** pre-ticked, so just choose "No expiration". With it:
 
-**You enter keys once.** They're saved on your phone in two places (localStorage and IndexedDB), and the app asks the browser to keep its storage permanently. If one copy is lost, the other restores it silently. For the worst case (all site data wiped), **Settings → Copy restore link** gives you a private link: open it once and your keys are back. Keys are never in the repo.
+- **Sync:** likes, history, playlists and recently played merge between your phone and laptop through a private gist (*Echo sync (private)*).
+- **Laptop downloads:** the **Echo laptop service** ([`echo_laptop.py`](echo_laptop.py)) runs in the background on the laptop and starts with Windows. It downloads every song you like, finish, or play without skipping, on any device, as MP3 into **Music/Echo** (yt-dlp + ffmpeg).
+- **Phone copies:** songs your phone doesn't have yet go into an inbox in your private **echo-music** repo. Echo on the phone copies them into its own storage, by default only on Wi-Fi. Once the phone has a song, the laptop removes it from the inbox, so GitHub only ever holds songs on their way to your phone (at most ~400).
+- **Download button:** tapping Download on the phone for a song you haven't played asks the laptop to fetch it, and it arrives a few minutes later.
 
-## Downloads
+The laptop has to be on for new songs to arrive. Songs already on the phone play without it, and without internet.
 
-A website can't save YouTube audio by itself (YouTube scrambles its audio links and blocks downloads from servers), so a small app on your phone does the work. Echo supports two:
+**Laptop setup** (already done on this laptop): Python with `yt-dlp`, ffmpeg, and the GitHub CLI (`gh`) logged in. Copy `echo_dl.py` and `echo_laptop.py` into `~/.echo/` and add a Startup shortcut that runs `pythonw ~/.echo/echo_laptop.py`. The log is `~/.echo/laptop.log`.
 
-**Easy: the Seal app (nothing to set up).** Install [Seal](https://f-droid.org/packages/com.junkfood.seal/) from F-Droid or its [GitHub page](https://github.com/JunkFood02/Seal/releases/latest). It's free and open source; YouTube downloaders aren't allowed on the Play Store. Then tap Download in Echo, pick **Seal** in the share menu, choose **Audio**, and tap Download. Seal converts the song to MP3 and saves it to Download/Seal. After the first time, Download goes straight to the share menu. To play those files offline inside Echo, add them with Library → Downloads → Import.
+**Your token is kept for good.** It's saved in two places on each device, and the browser is asked to keep its storage permanently. If one copy is lost, the other restores it silently. If all site data is ever wiped, **Settings → Copy restore link** gives you a private link that brings it back.
 
-**Automatic: the Termux helper.** Use this if you want every song you listen to downloaded by itself and kept inside Echo. The setup is below.
+Everything else (search, charts, playback, Mixes, radio, recommendations, lyrics) needs **no keys**. Keyless YouTube search goes through the free Jina reader (r.jina.ai), at about 20 searches a minute.
 
-### Termux helper (Python + yt-dlp, on your phone)
+### Optional: downloading on the phone itself (Termux)
 
-Downloads run through [`echo_dl.py`](echo_dl.py), a small Python script that uses yt-dlp. It runs on your own phone, so YouTube sees your normal connection. (Running it on GitHub's servers doesn't work: YouTube blocks them.)
-
-One-time setup on Android:
-
-1. Install **Termux** from F-Droid (the Play Store version is outdated).
-2. Open Termux and run:
-   ```bash
-   curl -fsSL https://atheendre130505.github.io/echo/setup.sh | bash
-   ```
-   This installs Python, ffmpeg and yt-dlp and starts the helper. It also makes the helper start whenever Termux opens.
-3. Tap Download in Echo. Songs are saved as MP3 to **Downloads/Echo**, and they also play offline inside the app.
-
-After restarting your phone, open Termux once. Run the same command again any time to update yt-dlp.
-
-On a computer, `pip install yt-dlp` then `python echo_dl.py --serve` does the same thing while you use Echo in that computer's browser. Without ffmpeg, audio is saved as M4A.
+If you'd rather not depend on the laptop, the same downloader ([`echo_dl.py`](echo_dl.py)) can run on the phone in **Termux** (from F-Droid):
+```bash
+curl -fsSL https://atheendre130505.github.io/echo/setup.sh | bash
+```
+After that, tapping Download opens Termux for you when needed; press Back and the download continues.
 
 ## Brave tips
 
@@ -121,4 +110,5 @@ On a computer, `pip install yt-dlp` then `python echo_dl.py --serve` does the sa
 
 - Some videos have embedding turned off by the uploader. Echo skips those automatically.
 - Downloading from YouTube is against YouTube's Terms of Service. Use it for your own personal listening.
-- Echo is not affiliated with YouTube, Spotify or Genius.
+- Storing music in a private GitHub repo is outside what GitHub is meant for. It's private, personal and kept small, but it's your call.
+- Echo is not affiliated with YouTube or Spotify.

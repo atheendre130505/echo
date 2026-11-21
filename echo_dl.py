@@ -19,10 +19,23 @@ import yt_dlp
 ID_RE = re.compile(r'^[\w-]{11}$')
 
 
+AUDIO_EXT = ('.mp3', '.m4a', '.webm', '.opus')
+
+
+def existing(vid, out, kind='audio'):
+    """A file already downloaded for this video, if any."""
+    exts = AUDIO_EXT if kind == 'audio' else ('.mp4',)
+    files = [f for f in glob.glob(os.path.join(glob.escape(out), f'*[[]{vid}[]].*')) if os.path.splitext(f)[1].lower() in exts]
+    return max(files, key=os.path.getmtime) if files else None
+
+
 def download(vid, kind, out):
     if not ID_RE.match(vid or ''):
         raise ValueError('bad video id')
     os.makedirs(out, exist_ok=True)
+    have = existing(vid, out, kind)
+    if have:
+        return have, vid
     opts = {
         'outtmpl': os.path.join(out, '%(title).120B [%(id)s].%(ext)s'),
         'noplaylist': True,
@@ -88,6 +101,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def authorized(self, q):  # the laptop service overrides this to require its key over the tunnel
+        return True
+
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
@@ -95,6 +111,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {'ok': True, 'app': 'echo-dl', 'yt_dlp': yt_dlp.version.__version__})
         if u.path != '/download':
             return self._json(404, {'error': 'not found'})
+        if not self.authorized(q):
+            return self._json(403, {'error': 'wrong key'})
         try:
             path, _ = download(q.get('id', [''])[0], q.get('kind', ['audio'])[0], self.out)
         except Exception as e:  # report the reason to the app
