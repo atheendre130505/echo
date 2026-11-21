@@ -1,2 +1,3 @@
 .claude/
 downloader/
+__pycache__/
