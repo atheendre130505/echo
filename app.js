@@ -16,7 +16,7 @@ const store = {
 };
 function pruneCache(maxAge = 3 * DAY) {
   for (const k of store.keys()) {
-    if (!/^(mix|s|gen|gly|lrc):/.test(k)) continue;
+    if (!/^(mix|s|gen|gly|lrc|chart|rr):/.test(k)) continue;
     const age = /^(gen|gly|lrc):/.test(k) ? 30 * DAY : maxAge;
     const v = store.get(k); if (!v || !v.at || Date.now() - v.at > age) store.del(k);
   }
@@ -99,7 +99,7 @@ function parseTitle(raw, ch) {
 }
 function trackFrom(id, rawTitle, channel) {
   const p = parseTitle(rawTitle, channel);
-  const t = { id, title: p.title, artist: p.artist, raw: decode(rawTitle), ch: channel };
+  const t = META[id] && META[id].fixed ? { raw: decode(rawTitle), ch: channel } : { id, title: p.title, artist: p.artist, raw: decode(rawTitle), ch: channel };
   META[id] = Object.assign(META[id] || {}, t); saveMeta(); return META[id];
 }
 const metaInflight = {};
@@ -286,13 +286,110 @@ async function ytSearch(q, quiet) {
   const ck = 's:' + q.toLowerCase().trim();
   const c = store.get(ck);
   if (c && Date.now() - c.at < 7 * DAY) return c.ids.map(i => META[i]).filter(Boolean);
-  if (!S.ytKey) throw new Error('nokey');
+  let ts;
+  if (!S.ytKey) {
+    ts = (await jinaSearch(q)).map(v => { const t = trackFrom(v.id, v.title, v.ch); if (v.dur) t.dur = v.dur; return t; });
+    saveMeta(); store.set(ck, { at: Date.now(), ids: ts.map(t => t.id) }); return ts;
+  }
   const u = 'https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoEmbeddable=true&videoCategoryId=10&maxResults=25&q=' + encodeURIComponent(q) + '&key=' + encodeURIComponent(S.ytKey);
   const r = await fetch(u); const j = await r.json();
   if (j.error) throw new Error(j.error.message || 'YouTube API error');
-  const ts = (j.items || []).filter(it => it.id && it.id.videoId).map(it => trackFrom(it.id.videoId, it.snippet.title, it.snippet.channelTitle));
+  ts = (j.items || []).filter(it => it.id && it.id.videoId).map(it => trackFrom(it.id.videoId, it.snippet.title, it.snippet.channelTitle));
   store.set(ck, { at: Date.now(), ids: ts.map(t => t.id) });
   return ts;
+}
+
+/* Keyless YouTube search: the Jina reader renders youtube.com/results and returns it as text. */
+const parseDur = s => s ? String(s).split(':').reduce((a, b) => a * 60 + +b, 0) : 0;
+async function jinaSearch(q) {
+  const r = await fetch('https://r.jina.ai/https://www.youtube.com/results?search_query=' + encodeURIComponent(q), { headers: { 'X-Timeout': '12', 'X-Wait-For-Selector': 'ytd-video-renderer' } });
+  if (!r.ok) throw new Error(r.status === 429 ? 'Too many searches, wait a minute' : 'search service ' + r.status);
+  const md = await r.text(), out = [], seen = new Set();
+  const re = /^### \[(.+?)\]\(https:\/\/www\.youtube\.com\/watch\?v=([\w-]{11})[^)]*\)/gm; let m;
+  while ((m = re.exec(md))) {
+    const id = m[2], title = m[1].replace(/\\([\[\]()_*#])/g, '$1');
+    if (seen.has(id) || /^Mix\s*[-–]/.test(title)) continue; seen.add(id);
+    const after = md.slice(re.lastIndex, re.lastIndex + 600), before = md.slice(Math.max(0, m.index - 800), m.index);
+    const ch = after.match(/\[([^\]]+)\]\(https:\/\/www\.youtube\.com\/(?:channel\/|@)/);
+    const seg = before.slice(before.lastIndexOf('[![Image')), d = seg.match(/\)\s+(\d{1,2}(?::\d{2}){1,2})\s/);
+    out.push({ id, title, ch: ch ? ch[1].trim() : '', dur: d ? parseDur(d[1]) : 0 });
+  }
+  if (!out.length) throw new Error('no results');
+  return out;
+}
+
+/* Apple's catalog: instant song search, charts and new releases (no key).
+   These songs are matched to a YouTube video when you play them. */
+const CC = () => (S.country || ((navigator.language || 'en-US').split('-')[1] || 'us')).toLowerCase().slice(0, 2);
+const countryName = () => { try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(CC().toUpperCase()); } catch { return CC().toUpperCase(); } };
+const amArt = u => String(u || '').replace(/\/\d+x\d+(bb)?\.(jpg|png)$/, '/600x600bb.jpg');
+function amTrack(o) {
+  const t = { id: 'am:' + o.id, title: o.title, artist: o.artist, art: amArt(o.art), dur: o.dur || 0, album: o.album || '', rel: o.rel || '', pending: true };
+  META[t.id] = Object.assign(META[t.id] || {}, t); return META[t.id];
+}
+const amFromApi = x => amTrack({ id: x.trackId, title: x.trackName, artist: x.artistName, art: x.artworkUrl100, dur: (x.trackTimeMillis || 0) / 1000, album: x.collectionName, rel: x.releaseDate });
+async function itunesSearch(q) {
+  const r = await fetch(`https://itunes.apple.com/search?media=music&entity=song&limit=25&country=${CC()}&term=${encodeURIComponent(q)}`);
+  const j = await r.json(); const out = (j.results || []).filter(x => x.trackId).map(amFromApi); saveMeta(); return out;
+}
+const GENRES = [[0, 'Top 50', '#1e3264'], [1263, 'Bollywood', '#e1118c'], [14, 'Pop', '#8d67ab'], [18, 'Hip-Hop', '#bc5900'], [1185, 'Indian Pop', '#e8115b'], [1264, 'Tamil', '#148a08'], [1265, 'Telugu', '#dc148c'], [1266, 'Regional Indian', '#477d95'], [1262, 'Indian', '#a56752'], [21, 'Rock', '#e91429'], [17, 'Dance', '#0d73ec'], [15, 'R&B / Soul', '#503750'], [20, 'Alternative', '#608108'], [7, 'Electronic', '#509bf5'], [51, 'K-Pop', '#e13300'], [1267, 'Devotional', '#7d4b32']];
+const genreName = g => (GENRES.find(x => x[0] === +g) || [0, 'Top 50'])[1];
+async function chart(genre = 0) {
+  const ck = 'chart:' + CC() + ':' + genre, c = store.get(ck);
+  if (c && Date.now() - c.at < 6 * 3600e3) { const l = c.ids.map(i => META[i]).filter(Boolean); if (l.length) return l; }
+  const r = await fetch(`https://itunes.apple.com/${CC()}/rss/topsongs/limit=50${+genre ? '/genre=' + genre : ''}/json`);
+  const j = await r.json(); let e = (j.feed && j.feed.entry) || []; if (!Array.isArray(e)) e = [e];
+  const out = e.map(x => amTrack({ id: x.id.attributes['im:id'], title: x['im:name'].label, artist: x['im:artist'].label, art: x['im:image'][x['im:image'].length - 1].label, album: x['im:collection'] && x['im:collection']['im:name'] && x['im:collection']['im:name'].label, rel: x['im:releaseDate'] && x['im:releaseDate'].label }));
+  saveMeta(); store.set(ck, { at: Date.now(), ids: out.map(t => t.id) }); return out;
+}
+async function releaseRadar() {
+  const p = profile(), seen = new Set(), out = [], cutoff = Date.now() - 150 * DAY;
+  const names = Object.entries(p.ar).filter(([, s]) => s > 0.3).sort((a, b) => b[1] - a[1]).slice(0, 6)
+    .map(([a]) => { const id = topTracks(1, m => akey(m.artist) === a)[0]; return id && primaryArtist(META[id].artist); }).filter(Boolean);
+  for (const n of names) {
+    try {
+      const a = ((await (await fetch(`https://itunes.apple.com/search?entity=musicArtist&limit=3&country=${CC()}&term=${encodeURIComponent(n)}`)).json()).results || []).find(x => norm(x.artistName) === norm(n));
+      if (!a) continue;
+      const l = (await (await fetch(`https://itunes.apple.com/lookup?id=${a.artistId}&entity=song&sort=recent&limit=10&country=${CC()}`)).json()).results || [];
+      l.filter(x => x.wrapperType === 'track' && Date.parse(x.releaseDate) > cutoff).slice(0, 4).forEach(x => { const t = amFromApi(x), k = songKey(t); if (!seen.has(k)) { seen.add(k); out.push(t); } });
+    } catch {}
+  }
+  saveMeta();
+  return out.sort((a, b) => Date.parse(b.rel) - Date.parse(a.rel));
+}
+// words that name a specific version, e.g. "(Dance Mix)", "(Lofi Flip)", "(Punjabi Version)"
+const variantWords = title => (String(title).match(/[\(\[]([^\)\]]+)[\)\]]/g) || []).map(x => x.slice(1, -1)).filter(x => !/^(from|feat|ft\.|with)\b/i.test(x))
+  .flatMap(x => x.toLowerCase().match(/[a-z]{3,}/g) || []).filter(w => !['version', 'the', 'and', 'from', 'original'].includes(w));
+function pickBest(t, list) {
+  const nt = norm(cleanForSearch(t.title)), na = norm(primaryArtist(t.artist)), vw = variantWords(t.title);
+  const variant = vw.length > 0 || /\b(live|remix|cover|acoustic|unplugged|lofi|slowed|reprise)\b/i.test(t.title);
+  let best = null, bs = -1e9;
+  list.forEach((v, i) => {
+    const raw = v.raw || v.title || '', tt = norm(raw), ch = norm(v.ch || '');
+    let s = -i * 0.15;
+    if (nt && tt.includes(nt)) s += 3; else if (nt && nt.length > 4 && nt.includes(norm(v.title))) s += 1;
+    if (na && (tt.includes(na) || ch.includes(na))) s += 2;
+    if (/\s-\stopic$/i.test(v.ch || '') || /vevo$/i.test(v.ch || '')) s += 1.5;
+    if (t.dur && v.dur) { const d = Math.abs(t.dur - v.dur); s += d < 4 ? 2 : d < 15 ? 1 : d > 90 ? -3 : 0; }
+    if (!variant && /\b(live|cover|karaoke|8d|slowed|reverb|sped\s*up|nightcore|instrumental|remix|reaction|1 hour|10 hours|teaser|trailer|lofi|lo-fi|status|ringtone)\b/i.test(raw)) s -= 3;
+    if (v.dur > 900) s -= 4;
+    if (vw.length) { const lr = raw.toLowerCase(); s += vw.every(w => lr.includes(w)) ? 2 : -3; }
+    if (s > bs) { bs = s; best = v; }
+  });
+  return bs >= 1 ? best : null;
+}
+const resolving = {};
+function resolveYT(t) {
+  if (!t || !t.pending) return Promise.resolve(t);
+  const m = store.get('map:' + t.id);
+  if (m && META[m.yt]) return Promise.resolve(META[m.yt]);
+  return resolving[t.id] || (resolving[t.id] = (async () => {
+    const list = await ytSearch([primaryArtist(t.artist), cleanForSearch(t.title), ...variantWords(t.title)].join(' '));
+    const best = pickBest(t, list); if (!best) throw new Error('not found');
+    // first match wins: another Apple version that maps to the same video must not rename it
+    const r = META[best.id] && META[best.id].fixed ? META[best.id] : (META[best.id] = Object.assign(META[best.id] || {}, { id: best.id, title: t.title, artist: t.artist, art: t.art, album: t.album, fixed: true }));
+    saveMeta(); store.set('map:' + t.id, { yt: best.id }); return r;
+  })().finally(() => delete resolving[t.id]));
 }
 const ytId = s => { s = String(s || '').trim(); const m = s.match(/(?:v=|youtu\.be\/|shorts\/|embed\/|live\/)([\w-]{11})/); if (m) return m[1]; return /^[\w-]{11}$/.test(s) && /[A-Z0-9_-]/.test(s) && /[a-z]/.test(s) ? s : null; };
 
@@ -309,7 +406,12 @@ function playQueue(tracks, i = 0, ctx = '', ctxKey = '') {
 }
 function shuffleArr(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 async function loadCur(autoplay = true) {
-  const t = cur(); if (!t) return;
+  let t = cur(); if (!t) return;
+  if (t.pending) {
+    renderPlayer(); $('#miniArtist').textContent = 'Finding on YouTube…';
+    try { const r = await resolveYT(t); if (cur() !== t) return; PS.q[PS.i] = r; t = r; }
+    catch (e) { if (cur() !== t) return; toast(`Couldn't find “${t.title}” on YouTube — skipping`); PS.q.splice(PS.i, 1); if (PS.i < PS.q.length) return loadCur(autoplay); return; }
+  }
   PS.logged = false; PS.startT = Date.now();
   $('#tapHint').hidden = true;
   const localKey = await pickLocal(t);
@@ -327,6 +429,7 @@ async function loadCur(autoplay = true) {
     if (autoplay) setTimeout(() => { if (cur() === t && PS.src === 'yt') { let st; try { st = yt.getPlayerState(); } catch {} if (st !== 1 && st !== 3) { $('#tapHint').hidden = false; if (!$('#np').classList.contains('open')) openNP(); setMode('video', true); } } }, 3500);
   }
   renderPlayer(); loadLyrics(t); setMediaSession(t); paintColor(t);
+  const nx = PS.q[PS.i + 1]; if (nx && nx.pending) resolveYT(nx).catch(() => {});
   if (S.autoplay && PS.i >= PS.q.length - 2) extendQueue();
 }
 async function pickLocal(t) {
@@ -691,9 +794,10 @@ function trackMenu(t, opts = {}) {
     <button class="mi" data-a="radio">${ic('radio')}Go to song radio</button>
     ${String(t.id).startsWith('local:') ? '' : `<button class="mi" data-a="dla">${ic('dl')}Download audio</button><button class="mi" data-a="dlv">${ic('film')}Download video</button>`}
     ${DLX[t.id] ? `<button class="mi" data-a="rmdl">${ic('trash')}Remove download</button>` : ''}
-    ${String(t.id).startsWith('local:') ? '' : `<button class="mi" data-a="share">${ic('share')}Share</button><a class="mi" href="https://www.youtube.com/watch?v=${esc(t.id)}" target="_blank" rel="noopener">${ic('yt')}Open on YouTube</a>`}`);
-  s.onclick = e => {
+    ${String(t.id).startsWith('local:') || t.pending ? '' : `<button class="mi" data-a="share">${ic('share')}Share</button><a class="mi" href="https://www.youtube.com/watch?v=${esc(t.id)}" target="_blank" rel="noopener">${ic('yt')}Open on YouTube</a>`}`);
+  s.onclick = async e => {
     const b = e.target.closest('[data-a]'); if (!b) return; const a = b.dataset.a; closeSheet();
+    if (t.pending && !['next', 'queue'].includes(a)) { const tn = toast('Finding on YouTube…', 0); try { t = await resolveYT(t); tn.hide(); } catch { tn.set("Couldn't find it on YouTube"); tn.hide(2500); return; } }
     if (a === 'like') toggleLike(t);
     else if (a === 'pl') addToPlaylist(t);
     else if (a === 'rmpl') { const p = PL[opts.plId]; p.ids = p.ids.filter(x => x !== t.id); store.set('pl', PL); renderView(); }
@@ -735,9 +839,12 @@ function renderQueueSheetIfOpen() { const s = $('#sheet'); if (!$('#sheetWrap').
 /* ───────────────────────── settings ───────────────────────── */
 function openSettings() {
   const s = sheet(`<div class="grab"></div><h3>Settings</h3>
-    <label for="sYt">YouTube Data API key (for search)</label>
+    <label for="sCc">Country for charts and new releases</label>
+    <input type="text" id="sCc" value="${esc(CC())}" maxlength="2" placeholder="in" autocomplete="off">
+    <div class="help">Two-letter code, e.g. in, us, gb.</div>
+    <label for="sYt">YouTube Data API key (optional)</label>
     <input type="password" id="sYt" value="${esc(S.ytKey)}" placeholder="AIza…" autocomplete="off">
-    <div class="help">Free: <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">enable YouTube Data API v3</a>, then Credentials → Create API key. Restrict it to your github.io site. ~100 searches/day free; results are cached. Recommendations, radio and playback don't use it.</div>
+    <div class="help">Free: <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">enable YouTube Data API v3</a>, then Credentials → Create API key. Not needed: search already works without it. A key only makes YouTube results appear faster (~100 searches/day).</div>
     <label for="sGe">Genius access token (lyrics + meanings)</label>
     <input type="password" id="sGe" value="${esc(S.geniusToken)}" placeholder="Client access token" autocomplete="off">
     <div class="help">Free: <a href="https://genius.com/api-clients" target="_blank" rel="noopener">genius.com/api-clients</a> → New API Client (any URL) → Generate Access Token. Without it, lyrics come from lrclib only.</div>
@@ -751,11 +858,11 @@ function openSettings() {
     <div class="bar"><button class="btn ghost" id="sRe">Refresh recommendations</button><button class="btn ghost" id="sClr">Clear listening history</button></div>
     <p class="help" style="margin-top:18px">Everything (history, likes, playlists, keys) stays on this device. Echo is not affiliated with YouTube, Spotify or Genius.</p>`);
   $('#sSave', s).onclick = () => {
-    S.ytKey = $('#sYt').value.trim(); S.geniusToken = $('#sGe').value.trim(); S.cobaltUrl = $('#sCo').value.trim(); S.cobaltKey = $('#sCk').value.trim();
+    S.country = ($('#sCc').value.trim().toLowerCase().match(/^[a-z]{2}$/) || [''])[0]; S.ytKey = $('#sYt').value.trim(); S.geniusToken = $('#sGe').value.trim(); S.cobaltUrl = $('#sCo').value.trim(); S.cobaltKey = $('#sCk').value.trim();
     S.autoplay = $('#sAuto').checked; S.preferLocal = $('#sLoc').checked; saveS(); closeSheet(); toast('Saved'); if (cur()) loadLyrics(cur()); renderView();
   };
   $('#sExp', s).onclick = () => {
-    const data = {}; for (const k of store.keys()) if (!/^(mix|s|gen|gly|lrc):/.test(k)) data[k] = store.get(k);
+    const data = {}; for (const k of store.keys()) if (!/^(mix|s|gen|gly|lrc|chart|rr):/.test(k)) data[k] = store.get(k);
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' })); a.download = 'echo-backup-' + dayKey() + '.json'; a.click();
   };
   $('#sImp', s).onchange = async e => { try { const d = JSON.parse(await e.target.files[0].text()); for (const [k, v] of Object.entries(d)) store.set(k, v); toast('Restored — reloading'); setTimeout(() => location.reload(), 800); } catch { toast('That file is not an Echo backup'); } };
@@ -784,15 +891,18 @@ function cardHTML(c) {
   if (c.kind === 'liked') cov = `<div class="liked-cov" style="width:100%;height:100%">${ic('heartF')}</div>`;
   else if (c.ids && c.ids.length >= 4 && c.collage) cov = `<div class="collage">${c.ids.slice(0, 4).map(id => `<img src="${esc(thumb(id))}" alt="" loading="lazy">`).join('')}</div>`;
   else cov = `<img src="${esc(thumb(c.ids ? c.ids[0] : c.id))}" alt="" loading="lazy">`;
-  return `<button class="card" data-go="${esc(c.go || '')}" data-play="${esc(c.play || '')}"><div class="cov">${cov}${c.color ? `<i class="tag" style="background:${c.color}"></i><div class="band">${esc(c.title)}</div>` : ''}</div><b>${esc(c.title)}</b><span>${esc(c.sub || '')}</span></button>`;
+  return `<button class="card" data-go="${esc(c.go || '')}" data-play="${esc(c.play || '')}" data-cq="${esc(c.cq || '')}"><div class="cov">${cov}${c.color ? `<i class="tag" style="background:${c.color}"></i><div class="band">${esc(c.title)}</div>` : ''}</div><b>${esc(c.title)}</b><span>${esc(c.sub || '')}</span></button>`;
 }
 function greeting() { const h = new Date().getHours(); return h < 5 ? 'Good night' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; }
-const STARTERS = ['4NRXx6U8ABQ', 'JGwWNGJdvx8', 'fJ9rUzIMcZQ', 'kXYiU_JCYtU', '1G4isv_Fylg', 'hT_nvWreIhg', 'OPf0YbXqDm0', '60ItHLz5WEA', 'kJQP7kiw5Fk', 'YQHsXMglC9A', 'RgKAFK5djSk', 'uelHwf8o7_U', '2Vv-BfVoq4g', 'fRh_vgS2dFE', 'dQw4w9WgXcQ', 'lp-EO5I60KA'];
-let homeBuilding = null;
+let homeBuilding = null, rrBuilding = null, RR = store.get('rr:list', null);
+const skelCards = n => Array.from({ length: n }, () => '<div class="card"><div class="cov skel"></div><b class="muted">&nbsp;</b></div>').join('');
+const chartCards = () => GENRES.slice(0, 10).map(([g, n, c]) => `<button class="card" data-go="list/chart:${g}"><div class="cov genre-cov" style="background:${c}"><span>${esc(n)}</span><small>${g ? 'Top songs' : esc(countryName())}</small></div><b>${esc(g ? n + ' — Top songs' : 'Top 50 — ' + countryName())}</b><span>Updated daily</span></button>`).join('');
+function playChart(g, i) { chart(g).then(list => playQueue(list, i, +g ? genreName(g) + ' — Top songs' : 'Top 50 — ' + countryName(), 'chart:' + g)).catch(() => toast('Charts unavailable right now')); }
 async function viewHome() {
   const recent = store.get('recent', []);
   const quick = [];
   if (LIKES.length) quick.push(`<button class="qi" data-go="list/liked"><div class="cov liked-cov">${ic('heartF')}</div><span>Liked Songs</span></button>`);
+  if (RR && RR.ids.length) quick.push(`<button class="qi" data-go="list/rr"><img src="${esc(thumb(RR.ids[0]))}" alt=""><span>Release Radar</span></button>`);
   (HOME && HOME.mixes || []).slice(0, 2).forEach(m => quick.push(`<button class="qi" data-go="list/${m.key}"><img src="${esc(thumb(m.ids[0]))}" alt=""><span>${esc(m.title)}</span></button>`));
   if (HOME && HOME.dw) quick.push(`<button class="qi" data-go="list/dw"><img src="${esc(thumb(HOME.dw.ids[0]))}" alt=""><span>Discover Weekly</span></button>`);
   recent.slice(0, 8 - quick.length).forEach(id => META[id] && quick.push(`<button class="qi" data-play="${esc(id)}"><img src="${esc(thumb(id))}" alt=""><span>${esc(META[id].title)}</span></button>`));
@@ -801,19 +911,21 @@ async function viewHome() {
     <div id="hs"></div>`;
   $('#gear').onclick = openSettings;
   const hs = $('#hs');
+  const trending = `<h3 class="sh">Trending in ${esc(countryName())}</h3><div class="shelf" id="trend">${skelCards(4)}</div>`;
   const draw = () => {
     let h = '';
     if (!hasHistory()) {
-      h += `<div class="note"><b>Welcome to Echo.</b> Play a few songs — or search for your favourites — and your Daily Mixes, Discover Weekly and radio will tune themselves to you. Skips under 30 seconds count as “not for me”, full listens and likes count as “more like this”.</div>`;
-      if (!S.ytKey) h += `<div class="note">To search for any song, add a free YouTube API key in <a href="#" id="hsSet" style="color:var(--acc)">Settings</a>. You can also paste any YouTube link into Search.</div>`;
-      h += `<h3 class="sh">Start listening</h3><div id="starter"></div>`;
+      h += `<div class="note"><b>Welcome to Echo.</b> Tap any song to start, or search for anything. Echo learns from what you play, skip and like, then builds your Daily Mixes, Discover Weekly and Release Radar.</div>`;
+      h += trending + `<h3 class="sh">Charts</h3><div class="shelf">${chartCards()}</div>`;
     } else {
       const mixes = (HOME && HOME.mixes || []).map(m => ({ title: m.title, sub: m.sub, ids: m.ids, color: m.color, go: 'list/' + m.key }));
       if (HOME && HOME.dw) mixes.unshift({ title: 'Discover Weekly', sub: HOME.dw.sub, ids: HOME.dw.ids, color: HOME.dw.color, go: 'list/dw', collage: true });
+      if (RR && RR.ids.length) mixes.unshift({ title: 'Release Radar', sub: 'New songs from artists you play', ids: RR.ids, color: '#e8115b', go: 'list/rr', collage: true });
       const onRepeat = Object.entries(profile().cnt30).filter(([id, n]) => n >= 2 && META[id]).sort((a, b) => b[1] - a[1]).map(x => x[0]);
       if (onRepeat.length >= 3) mixes.push({ title: 'On Repeat', sub: 'Songs you love right now', ids: onRepeat, go: 'list/repeat', collage: true });
-      h += `<h3 class="sh">Made for you</h3><div class="shelf">${mixes.map(cardHTML).join('') || ''}${homeBuilding ? '<div class="card"><div class="cov skel"></div><b class="muted">Mixing…</b></div>' : ''}</div>`;
+      h += `<h3 class="sh">Made for you</h3><div class="shelf">${mixes.map(cardHTML).join('') || ''}${homeBuilding || rrBuilding ? '<div class="card"><div class="cov skel"></div><b class="muted">Mixing…</b></div>' : ''}</div>`;
       if (recent.length) h += `<h3 class="sh">Recently played</h3><div class="shelf">${recent.filter(id => META[id]).slice(0, 15).map(id => cardHTML({ title: META[id].title, sub: META[id].artist, id, play: id })).join('')}</div>`;
+      h += trending;
       const p = profile(), now = Date.now();
       const jump = Object.entries(p.cnt).filter(([id, n]) => n >= 2 && META[id] && (!p.last[id] || now - p.last[id] > 10 * DAY)).sort((a, b) => b[1] - a[1]).slice(0, 15).map(x => x[0]);
       if (jump.length) h += `<h3 class="sh">Jump back in</h3><div class="shelf">${jump.map(id => cardHTML({ title: META[id].title, sub: META[id].artist, id, play: id })).join('')}</div>`;
@@ -822,15 +934,17 @@ async function viewHome() {
         const cards = topA.map(([a]) => { const id = topTracks(1, m => akey(m.artist) === a)[0]; return id ? cardHTML({ title: primaryArtist(META[id].artist) + ' Radio', sub: 'Based on ' + META[id].title, id, go: 'list/radio:' + id }) : ''; }).join('');
         h += `<h3 class="sh">Your top artist radios</h3><div class="shelf">${cards}</div>`;
       }
+      h += `<h3 class="sh">Charts</h3><div class="shelf">${chartCards()}</div>`;
     }
     hs.innerHTML = h;
-    const hsSet = $('#hsSet'); if (hsSet) hsSet.onclick = e => { e.preventDefault(); openSettings(); };
-    const st = $('#starter');
-    if (st) metas(STARTERS).then(ts => { if (!document.body.contains(st)) return; st.innerHTML = ts.map((t, i) => rowHTML(t, i)).join(''); bindRows(st, ts, 'Start listening', ''); });
+    const tr = $('#trend');
+    if (tr) chart(0).then(ts => { if (!document.body.contains(tr)) return; tr.innerHTML = ts.slice(0, 25).map((t, i) => cardHTML({ title: t.title, sub: t.artist, id: t.id, cq: '0:' + i })).join(''); })
+      .catch(() => { tr.innerHTML = '<p class="muted small">Charts unavailable right now.</p>'; });
   };
   draw();
   V.onclick = e => {
     const g = e.target.closest('[data-go]'); if (g && g.dataset.go) { go(g.dataset.go); return; }
+    const c = e.target.closest('[data-cq]'); if (c && c.dataset.cq) { const [gg, i] = c.dataset.cq.split(':'); playChart(gg, +i); return; }
     const p = e.target.closest('[data-play]'); if (p && p.dataset.play) { const t = META[p.dataset.play]; if (t) { playQueue([t], 0, 'Recently played'); extendQueue(); } }
   };
   if (hasHistory() && (!HOME || HOME.day !== dayKey() || Date.now() - HOME.at > 6 * 3600e3) && !homeBuilding) {
@@ -838,42 +952,54 @@ async function viewHome() {
       .then(h => { HOME = h; store.set('home', h); }).catch(() => {}).finally(() => { homeBuilding = null; if (route().name === 'home') draw(); });
     draw();
   }
+  if (hasHistory() && (!RR || Date.now() - RR.at > 12 * 3600e3) && !rrBuilding) {
+    rrBuilding = releaseRadar().then(ts => { RR = { at: Date.now(), ids: ts.map(t => t.id) }; store.set('rr:list', RR); }).catch(() => {})
+      .finally(() => { rrBuilding = null; if (route().name === 'home') draw(); });
+  }
 }
-const GENRES = [['Pop', '#8d67ab'], ['Hip-Hop', '#bc5900'], ['Bollywood', '#e1118c'], ['Rock', '#e91429'], ['Lo-fi', '#477d95'], ['Indie', '#608108'], ['R&B', '#dc148c'], ['EDM', '#0d73ec'], ['Punjabi', '#e8115b'], ['Tamil', '#148a08'], ['K-pop', '#a56752'], ['Latin', '#e13300'], ['Workout', '#777'], ['Chill', '#503750'], ['Jazz', '#1e3264'], ['Classical', '#7d4b32']];
 function viewSearch(q = '') {
   const recentQ = store.get('recentQ', []);
   V.innerHTML = `<div class="top"><h1>Search</h1></div>
-    <div class="sbox"><form id="sf">${ic('search')}<input id="sq" type="search" enterkeyhint="search" placeholder="What do you want to listen to?" value="${esc(q)}" autocomplete="off"></form></div>
+    <div class="sbox"><form id="sf">${ic('search')}<input id="sq" type="search" enterkeyhint="search" placeholder="Songs, artists, albums" value="${esc(q)}" autocomplete="off"></form></div>
     <div id="sr"></div>`;
   const inp = $('#sq'), sr = $('#sr');
   const browse = () => {
     sr.innerHTML = (recentQ.length ? `<h3 class="sh">Recent searches</h3><div class="recent-q">${recentQ.map(x => `<button class="chip" data-q="${esc(x)}">${esc(x)}</button>`).join('')}</div>` : '') +
-      `<h3 class="sh">Browse all</h3><div class="genres">${GENRES.map(([g, c]) => `<button class="genre" style="background:${c}" data-q="${esc(g + ' songs')}">${esc(g)}</button>`).join('')}</div>` +
-      (S.ytKey ? '' : `<div class="note">Add a YouTube API key in Settings to search all of YouTube. Without it you can search songs you've already played, or paste a YouTube link.</div>`);
+      `<h3 class="sh">Browse charts</h3><div class="genres">${GENRES.map(([g, n, c]) => `<button class="genre" style="background:${c}" data-go="list/chart:${g}">${esc(n)}</button>`).join('')}</div>`;
   };
-  const localResults = s => { const n = norm(s); if (!n) return []; return Object.values(META).filter(t => t && t.title && (norm(t.title).includes(n) || norm(t.artist).includes(n))).slice(0, 8); };
+  const mine = () => new Set([...LIKES, ...store.get('recent', []), ...EV.map(e => e.i), ...Object.values(PL).flatMap(p => p.ids), ...Object.keys(DLX)]);
+  const localResults = s => { const n = norm(s); if (!n) return []; const ids = mine(); return [...ids].map(i => META[i]).filter(t => t && t.title && !t.pending && (norm(t.title).includes(n) || norm(t.artist).includes(n))).slice(0, 5); };
+  let tok = 0;
   const show = async (s, remote) => {
-    const id = ytId(s);
+    const my = ++tok;
+    const id = /youtu|^[\w-]{11}$/.test(s) ? ytId(s) : null;
     if (id) { sr.innerHTML = '<p class="muted">Loading link…</p>'; try { const t = await meta(id); sr.innerHTML = rowHTML(t, 0); bindRows(sr, [t], 'Link', ''); } catch { sr.innerHTML = '<p class="empty">Couldn’t load that YouTube link.</p>'; } return; }
     const loc = localResults(s);
-    let h = loc.length ? `<h3 class="sh">In your library</h3><div id="srl">${loc.map((t, i) => rowHTML(t, i)).join('')}</div>` : '';
-    sr.innerHTML = h + (remote ? '<div id="srr"><p class="muted">Searching YouTube…</p></div>' : (S.ytKey ? '<p class="muted small" style="margin-top:12px">Press search to look on YouTube</p>' : ''));
-    if (loc.length) bindRows($('#srl'), loc, 'Search', '');
+    sr.innerHTML = (loc.length ? `<h3 class="sh">In your library</h3><div id="srl">${loc.map((t, i) => rowHTML(t, i)).join('')}</div>` : '') +
+      `<div id="sra"><h3 class="sh">Songs</h3><p class="muted small">Searching…</p></div>` +
+      (remote ? `<div id="srv"><h3 class="sh">Videos</h3><p class="muted small">Searching YouTube… this takes a few seconds</p></div>` : '');
+    if (loc.length) bindRows($('#srl'), loc, 'Search: ' + s, '');
+    itunesSearch(s).then(ts => {
+      if (my !== tok) return; const el = $('#sra');
+      if (!ts.length) { el.innerHTML = remote ? '' : '<p class="muted small" style="margin-top:12px">No songs found. Press search to look on YouTube.</p>'; return; }
+      el.innerHTML = '<h3 class="sh">Songs</h3>' + ts.map((t, i) => rowHTML(t, i)).join('');
+      bindRows(el, ts, 'Search: ' + s, '');
+      if (remote && ts[0]) resolveYT(ts[0]).catch(() => {});
+    }).catch(() => { if (my === tok) $('#sra').innerHTML = ''; });
     if (!remote) return;
-    const rr = $('#srr');
-    try {
-      const ts = await ytSearch(s);
-      const rq = [s, ...recentQ.filter(x => x.toLowerCase() !== s.toLowerCase())].slice(0, 10); store.set('recentQ', rq);
-      rr.innerHTML = ts.length ? `<h3 class="sh">Songs</h3>${ts.map((t, i) => rowHTML(t, i)).join('')}` : '<p class="empty">No results.</p>';
-      bindRows(rr, ts, 'Search: ' + s, '');
-    } catch (e) {
-      rr.innerHTML = e.message === 'nokey' ? `<div class="note">Searching YouTube needs a free API key. <button class="btn" id="srSet" style="margin-top:10px">Add key in Settings</button></div>` : `<p class="empty">Search failed: ${esc(e.message)}</p>`;
-      const b = $('#srSet'); if (b) b.onclick = openSettings;
-    }
+    store.set('recentQ', [s, ...recentQ.filter(x => x.toLowerCase() !== s.toLowerCase())].slice(0, 10));
+    ytSearch(s).then(ts => {
+      if (my !== tok) return; const el = $('#srv');
+      el.innerHTML = '<h3 class="sh">Videos</h3>' + ts.slice(0, 15).map((t, i) => rowHTML(t, i)).join('');
+      bindRows(el, ts.slice(0, 15), 'Search: ' + s, '');
+    }).catch(e => { if (my === tok) $('#srv').innerHTML = `<p class="muted small">YouTube search didn’t answer (${esc(e.message)}). Songs above still play.</p>`; });
   };
-  let deb; inp.oninput = () => { clearTimeout(deb); deb = setTimeout(() => inp.value.trim() ? show(inp.value.trim(), false) : browse(), 250); };
+  let deb; inp.oninput = () => { clearTimeout(deb); deb = setTimeout(() => inp.value.trim() ? show(inp.value.trim(), false) : browse(), 450); };
   $('#sf').onsubmit = e => { e.preventDefault(); inp.blur(); const s = inp.value.trim(); if (s) { history.replaceState(null, '', '#search/' + encodeURIComponent(s)); show(s, true); } };
-  sr.addEventListener('click', e => { const c = e.target.closest('[data-q]'); if (c) { inp.value = c.dataset.q; $('#sf').requestSubmit(); } });
+  sr.addEventListener('click', e => {
+    const c = e.target.closest('[data-q]'); if (c) { inp.value = c.dataset.q; $('#sf').requestSubmit(); return; }
+    const g = e.target.closest('[data-go]'); if (g) go(g.dataset.go);
+  });
   if (q) show(q, true); else browse();
 }
 function viewLibrary() {
@@ -898,6 +1024,11 @@ async function resolveList(key) {
   if (key === 'repeat') { const c = profile().cnt30; return { title: 'On Repeat', sub: 'Songs you love right now', ids: Object.entries(c).filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).map(x => x[0]).slice(0, 30) }; }
   if (key === 'dw') return HOME && HOME.dw ? { title: 'Discover Weekly', sub: HOME.dw.sub + ' · refreshes Monday', ids: HOME.dw.ids, hc: '#509bf5' } : null;
   if (key.startsWith('daily')) { const m = HOME && HOME.mixes.find(x => x.key === key); return m ? { title: m.title, sub: m.sub, ids: m.ids, hc: m.color } : null; }
+  if (key === 'rr') return RR && RR.ids.length ? { title: 'Release Radar', sub: 'New songs from artists you play · updated daily', ids: RR.ids, hc: '#e8115b' } : null;
+  if (key.startsWith('chart:')) {
+    const g = key.slice(6), ts = await chart(g), gc = GENRES.find(x => x[0] === +g);
+    return { title: +g ? genreName(g) + ' — Top songs' : 'Top 50 — ' + countryName(), sub: 'Most popular in ' + countryName() + ' right now · updated daily', ids: ts.map(t => t.id), hc: gc ? gc[2] : '#1e3264' };
+  }
   if (key.startsWith('pl:')) { const p = PL[key.slice(3)]; return p ? { title: p.name, sub: p.ids.length + ' songs', ids: p.ids.slice(), plId: key.slice(3) } : null; }
   if (key.startsWith('radio:')) {
     const id = key.slice(6), seed = await meta(id).catch(() => null); if (!seed) return null;

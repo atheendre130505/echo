@@ -202,5 +202,7 @@ h3.sh{font-size:20px;margin:26px 0 12px;letter-spacing:-.2px}
 /* hidden fetcher player: must stay rendered for the API to work */
 #ytfWrap{position:fixed;left:-400px;top:0;width:200px;height:200px;opacity:0;pointer-events:none;overflow:hidden}
 /* YouTube hq thumbnails are 4:3 with letterbox bars — zoom past them */
-#npArt,.lh .bigcov>img{transform:scale(1.34)}
+#npArt[src*="hqdefault"],.lh .bigcov>img[src*="hqdefault"]{transform:scale(1.34)}
 #np>.np-bg{position:absolute;max-width:none;margin:0}
+.genre-cov{display:flex;flex-direction:column;justify-content:flex-end;padding:12px;font-weight:800;font-size:20px;line-height:1.1}
+.genre-cov small{font-size:12px;font-weight:600;opacity:.85;margin-top:4px}

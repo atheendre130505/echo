@@ -2,6 +2,8 @@
 
 A phone-first music and video player that uses YouTube for its catalog. It runs as a static site on GitHub Pages. There is no server and no account; everything is stored on your phone.
 
+- **Search with no keys**: song results appear instantly from Apple's music catalog, and YouTube video results follow a few seconds later. Tap any song and Echo finds the matching YouTube video and plays it.
+- **New music without searching**: "Trending in your country", daily charts for 16 genres (Bollywood, Tamil, Telugu, Indian Pop, Pop, Hip-Hop, K-Pop…), and **Release Radar**, which shows new songs from artists you listen to.
 - **Home**: Daily Mixes, Discover Weekly, On Repeat, Jump back in, Recently played and radios for your top artists.
 - **Player**: switch between *Song* and *Video*, with shuffle, repeat, a queue, and autoplay radio when the queue runs out.
 - **Lyrics**: full lyrics from Genius, karaoke-style synced lyrics from lrclib, and a **Meaning** tab with Genius's "About this song" text and line-by-line explanations. Highlighted lyric lines can be tapped for their explanation.
@@ -33,11 +35,11 @@ When you change a file later, increase the `?v=2` in `index.html` so phones load
 
 | What | Why | Where |
 |---|---|---|
-| YouTube Data API key | Searching all of YouTube (~100 searches/day free; results are cached) | console.cloud.google.com, then enable **YouTube Data API v3**, then **Credentials → Create API key**. Restrict it to `https://<you>.github.io/*`. |
+| YouTube Data API key *(optional)* | Makes YouTube video results appear faster. Search already works without it. | console.cloud.google.com, then enable **YouTube Data API v3**, then **Credentials → Create API key**. Restrict it to `https://<you>.github.io/*`. |
 | Genius access token | Genius lyrics and song meanings | genius.com/api-clients, then **New API Client** (any URL), then **Generate Access Token** |
 | cobalt server *(optional)* | One-tap downloads inside the app | Self-host cobalt (github.com/imputnet/cobalt, Docker). Without it, Download copies the link and opens cobalt.tools. |
 
-Playback, Mixes, radio, recommendations and synced lyrics need **no keys**. Keys are stored only on your phone and are never in the repo.
+Search, charts, playback, Mixes, radio, recommendations and synced lyrics need **no keys**. Keyless YouTube search goes through the free Jina reader (r.jina.ai), which allows about 20 searches a minute. Keys are stored only on your phone and are never in the repo.
 
 ## Brave tips
 
