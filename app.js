@@ -180,10 +180,14 @@ async function rank(cands, o = {}) {
   const ids = [...cands.entries()].filter(([id]) => !(o.exclude && o.exclude.has(id))).sort((a, b) => b[1] - a[1]).slice(0, o.pool || 70).map(x => x[0]);
   const tracks = await metas(ids);
   const seen = new Set(o.excludeSongs || []);
+  // artist cluster: artists that recur across the candidate mixes are the core of this sound
+  const aw = {}; if (o.cluster) for (const t of tracks) { const a = akey(t.artist); aw[a] = (aw[a] || 0) + (cands.get(t.id) || 0); }
   const scored = [];
   for (const t of tracks) {
     const a = akey(t.artist), known = (p.ar[a] || 0) !== 0 || EV.some(e => e.a === a);
-    let s = Math.log1p(cands.get(t.id) || 0) * 1.2 + ((p.ar[a] || 0) / maxA) * 0.9;
+    let s = Math.log1p(cands.get(t.id) || 0) * 1.2 + ((p.ar[a] || 0) / maxA) * (o.affinity ?? 0.9);
+    if (o.cluster) s += Math.log1p(Math.max(0, aw[a] - (cands.get(t.id) || 0))) * o.cluster;
+    if (likeSet.has(t.id)) s += 0.4;
     if ((p.tr[t.id] || 0) < 0) s -= 2 + (p.skips[t.id] || 0) * 0.5;
     if ((p.ar[a] || 0) < -1) s -= 1;
     if (p.last[t.id] && Date.now() - p.last[t.id] < 4 * 3600e3) s -= 1.5;
@@ -244,13 +248,26 @@ async function buildHome(onShelf) {
   onShelf && onShelf(out);
   return out;
 }
+/* Song radio — "more like what I'm hearing".
+   The song you're on dominates. Its YouTube Mix (songs people play right after it)
+   is the main signal; two hops from that mix and the last couple of songs you
+   actually finished this session are folded in, so songs that show up across
+   several related mixes (the "centre" of that sound) rank highest. Your overall
+   taste only nudges the order a little (affinity 0.35), so the radio stays
+   close to the current song instead of drifting to your usual favourites. */
 async function radioFor(track, exclude = new Set()) {
-  const c = await candidates([track.id]);
-  const p = profile();
-  // blend in one of your liked/top songs by the same artist for familiarity
-  topTracks(40, m => akey(m.artist) === akey(track.artist)).slice(0, 3).forEach(id => c.set(id, (c.get(id) || 0) + 0.5));
-  return rank(c, { n: 25, exclude, excludeSongs: [songKey(track)] });
+  const c = new Map();
+  // early positions in a Mix are the closest matches; the long tail drifts toward general hits
+  const add = (ids, w) => (ids || []).slice(0, 60).forEach((id, pos) => c.set(id, (c.get(id) || 0) + w * Math.max(0.15, 1 - pos / 40)));
+  const base = await getMix(track.id); add(base, 2);
+  const recentGood = PS.session.filter(x => x.done && x.id !== track.id && Date.now() - x.t < 45 * 60e3).slice(-2).map(x => x.id);
+  const hops = (base || []).slice(0, 3);
+  const more = await pool([...recentGood, ...hops], 1, getMix);
+  more.forEach((ids, k) => add(ids, k < recentGood.length ? 0.7 : 0.6));
+  if (!c.size) return [];
+  return rank(c, { n: 30, exclude, excludeSongs: [songKey(track)], affinity: 0.35, pool: 100, cluster: 0.5 });
 }
+function startRadio(t) { if (t) playQueue([t], 0, t.title + ' Radio', 'radio'); }
 
 /* ───────────────────────── YouTube players ───────────────────────── */
 let yt = null, ytReady = false;
@@ -395,12 +412,12 @@ const ytId = s => { s = String(s || '').trim(); const m = s.match(/(?:v=|youtu\.
 
 /* ───────────────────────── playback ───────────────────────── */
 const lv = $('#lv');
-const PS = { q: [], i: -1, ctx: '', ctxKey: '', src: null, playing: false, shuffle: false, repeat: 0, logged: false, startT: 0, orig: null, url: null };
+const PS = { q: [], i: -1, ctx: '', ctxKey: '', src: null, playing: false, shuffle: false, repeat: 0, logged: false, startT: 0, orig: null, url: null, session: [], auto: new Set(), skipRun: 0 };
 const cur = () => PS.q[PS.i] || null;
 function curTime() { if (PS.src === 'local') return lv.currentTime || 0; try { return yt && yt.getCurrentTime ? yt.getCurrentTime() || 0 : 0; } catch { return 0; } }
 function curDur() { if (PS.src === 'local') return isFinite(lv.duration) ? lv.duration : 0; try { return yt && yt.getDuration ? yt.getDuration() || 0 : 0; } catch { return 0; } }
 function playQueue(tracks, i = 0, ctx = '', ctxKey = '') {
-  PS.q = tracks.filter(Boolean).slice(); PS.i = Math.max(0, Math.min(i, PS.q.length - 1)); PS.ctx = ctx; PS.ctxKey = ctxKey; PS.orig = null;
+  PS.q = tracks.filter(Boolean).slice(); PS.i = Math.max(0, Math.min(i, PS.q.length - 1)); PS.ctx = ctx; PS.ctxKey = ctxKey; PS.orig = null; PS.auto = new Set(); PS.skipRun = 0;
   if (PS.shuffle) { const c = PS.q.splice(PS.i, 1)[0]; shuffleArr(PS.q); PS.q.unshift(c); PS.i = 0; }
   loadCur(true);
 }
@@ -446,17 +463,31 @@ async function extendQueue() {
     const ex = new Set(PS.q.map(x => x.id));
     const more = await radioFor(t, ex);
     const keys = new Set(PS.q.map(songKey));
-    more.filter(m => !keys.has(songKey(m))).slice(0, 15).forEach(m => PS.q.push(m));
+    more.filter(m => !keys.has(songKey(m))).slice(0, PS.q.length - PS.i <= 2 ? 25 : 15).forEach(m => { PS.q.push(m); PS.auto.add(m.id); });
     renderQueueSheetIfOpen();
   } catch {} finally { extending = false; }
 }
 function onStarted() {
   const t = cur(); if (!t || PS.logged) return; PS.logged = true; logEv('play', t); bumpRecent(t.id);
+  PS.session.push({ id: t.id, t: Date.now(), done: false }); if (PS.session.length > 20) PS.session.shift();
 }
-function onEnded() { const t = cur(); logEv('done', t); if (PS.repeat === 2) { seekTo(0); play(); return; } next(false); }
+function markDone(t) { const s = PS.session.slice().reverse().find(x => x.id === t.id); if (s) s.done = true; }
+function onEnded() { const t = cur(); logEv('done', t); if (t) markDone(t); PS.skipRun = 0; if (PS.repeat === 2) { seekTo(0); play(); return; } next(false); }
 function next(user = true) {
   const t = cur();
-  if (user && t && curTime() < 30 && curDur() > 45) logEv('skip', t);
+  if (user && t && curTime() < 30 && curDur() > 45) {
+    logEv('skip', t); PS.skipRun++;
+    // adapt like Spotify radio: drop queued radio picks by the artist you just skipped…
+    const a = akey(t.artist);
+    PS.q = PS.q.filter((x, k) => k <= PS.i || !PS.auto.has(x.id) || akey(x.artist) !== a);
+    // …and after two skips in a row, re-steer the rest of the radio from the last song you finished
+    if (PS.skipRun >= 2) {
+      PS.q = PS.q.filter((x, k) => k <= PS.i + 1 || !PS.auto.has(x.id));
+      const good = PS.session.slice().reverse().find(x => x.done);
+      if (good && META[good.id]) radioFor(META[good.id], new Set(PS.q.map(x => x.id))).then(l => { l.slice(0, 20).forEach(m => { PS.q.push(m); PS.auto.add(m.id); }); renderQueueSheetIfOpen(); }).catch(() => {});
+      PS.skipRun = 0;
+    }
+  } else if (user && t && curTime() >= 60) { markDone(t); PS.skipRun = 0; }
   if (PS.i < PS.q.length - 1) { PS.i++; loadCur(); }
   else if (PS.repeat === 1 && PS.q.length) { PS.i = 0; loadCur(); }
   else if (S.autoplay) { extendQueue().then(() => { if (PS.i < PS.q.length - 1) { PS.i++; loadCur(); } else { pause(); } }); toast('Finding more songs…'); }
@@ -883,7 +914,7 @@ function rowHTML(t, i, noMenu) {
 function bindRows(root, tracks, ctx, ctxKey, opts = {}) {
   root.onclick = e => {
     const m = e.target.closest('[data-menu]'); if (m) { e.stopPropagation(); trackMenu(tracks[+m.dataset.menu], opts); return; }
-    const r = e.target.closest('.row[data-i]'); if (r) { const i = +r.dataset.i; if (cur() && cur().id === tracks[i].id) { openNP(); return; } playQueue(tracks, i, ctx, ctxKey); }
+    const r = e.target.closest('.row[data-i]'); if (r) { const i = +r.dataset.i; if (cur() && cur().id === tracks[i].id) { openNP(); return; } opts.radio ? startRadio(tracks[i]) : playQueue(tracks, i, ctx, ctxKey); }
   };
 }
 function cardHTML(c) {
@@ -891,13 +922,14 @@ function cardHTML(c) {
   if (c.kind === 'liked') cov = `<div class="liked-cov" style="width:100%;height:100%">${ic('heartF')}</div>`;
   else if (c.ids && c.ids.length >= 4 && c.collage) cov = `<div class="collage">${c.ids.slice(0, 4).map(id => `<img src="${esc(thumb(id))}" alt="" loading="lazy">`).join('')}</div>`;
   else cov = `<img src="${esc(thumb(c.ids ? c.ids[0] : c.id))}" alt="" loading="lazy">`;
-  return `<button class="card" data-go="${esc(c.go || '')}" data-play="${esc(c.play || '')}" data-cq="${esc(c.cq || '')}"><div class="cov">${cov}${c.color ? `<i class="tag" style="background:${c.color}"></i><div class="band">${esc(c.title)}</div>` : ''}</div><b>${esc(c.title)}</b><span>${esc(c.sub || '')}</span></button>`;
+  return `<button class="card" data-go="${esc(c.go || '')}" data-play="${esc(c.play || '')}" data-cq="${esc(c.cq || '')}" data-rq="${esc(c.rq || '')}"><div class="cov">${cov}${c.color ? `<i class="tag" style="background:${c.color}"></i><div class="band">${esc(c.title)}</div>` : ''}</div><b>${esc(c.title)}</b><span>${esc(c.sub || '')}</span></button>`;
 }
 function greeting() { const h = new Date().getHours(); return h < 5 ? 'Good night' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; }
+let BEC = { id: null, list: [] };
 let homeBuilding = null, rrBuilding = null, RR = store.get('rr:list', null);
 const skelCards = n => Array.from({ length: n }, () => '<div class="card"><div class="cov skel"></div><b class="muted">&nbsp;</b></div>').join('');
 const chartCards = () => GENRES.slice(0, 10).map(([g, n, c]) => `<button class="card" data-go="list/chart:${g}"><div class="cov genre-cov" style="background:${c}"><span>${esc(n)}</span><small>${g ? 'Top songs' : esc(countryName())}</small></div><b>${esc(g ? n + ' — Top songs' : 'Top 50 — ' + countryName())}</b><span>Updated daily</span></button>`).join('');
-function playChart(g, i) { chart(g).then(list => playQueue(list, i, +g ? genreName(g) + ' — Top songs' : 'Top 50 — ' + countryName(), 'chart:' + g)).catch(() => toast('Charts unavailable right now')); }
+function playChart(g, i) { chart(g).then(list => startRadio(list[i])).catch(() => toast('Charts unavailable right now')); }
 async function viewHome() {
   const recent = store.get('recent', []);
   const quick = [];
@@ -923,9 +955,10 @@ async function viewHome() {
       if (RR && RR.ids.length) mixes.unshift({ title: 'Release Radar', sub: 'New songs from artists you play', ids: RR.ids, color: '#e8115b', go: 'list/rr', collage: true });
       const onRepeat = Object.entries(profile().cnt30).filter(([id, n]) => n >= 2 && META[id]).sort((a, b) => b[1] - a[1]).map(x => x[0]);
       if (onRepeat.length >= 3) mixes.push({ title: 'On Repeat', sub: 'Songs you love right now', ids: onRepeat, go: 'list/repeat', collage: true });
+      const last = (cur() && !cur().pending && !String(cur().id).startsWith('local:')) ? cur() : META[recent.find(id => META[id] && !String(id).startsWith('local:'))];
+      if (last) h += `<h3 class="sh">More like ${esc(last.title)}</h3><div class="shelf" id="because" data-seed="${esc(last.id)}">${skelCards(4)}</div>`;
       h += `<h3 class="sh">Made for you</h3><div class="shelf">${mixes.map(cardHTML).join('') || ''}${homeBuilding || rrBuilding ? '<div class="card"><div class="cov skel"></div><b class="muted">Mixing…</b></div>' : ''}</div>`;
       if (recent.length) h += `<h3 class="sh">Recently played</h3><div class="shelf">${recent.filter(id => META[id]).slice(0, 15).map(id => cardHTML({ title: META[id].title, sub: META[id].artist, id, play: id })).join('')}</div>`;
-      h += trending;
       const p = profile(), now = Date.now();
       const jump = Object.entries(p.cnt).filter(([id, n]) => n >= 2 && META[id] && (!p.last[id] || now - p.last[id] > 10 * DAY)).sort((a, b) => b[1] - a[1]).slice(0, 15).map(x => x[0]);
       if (jump.length) h += `<h3 class="sh">Jump back in</h3><div class="shelf">${jump.map(id => cardHTML({ title: META[id].title, sub: META[id].artist, id, play: id })).join('')}</div>`;
@@ -934,9 +967,14 @@ async function viewHome() {
         const cards = topA.map(([a]) => { const id = topTracks(1, m => akey(m.artist) === a)[0]; return id ? cardHTML({ title: primaryArtist(META[id].artist) + ' Radio', sub: 'Based on ' + META[id].title, id, go: 'list/radio:' + id }) : ''; }).join('');
         h += `<h3 class="sh">Your top artist radios</h3><div class="shelf">${cards}</div>`;
       }
+      h += trending;
       h += `<h3 class="sh">Charts</h3><div class="shelf">${chartCards()}</div>`;
     }
     hs.innerHTML = h;
+    const bc = $('#because');
+    if (bc) { const sid = bc.dataset.seed; (BEC.id === sid ? Promise.resolve(BEC.list) : radioFor(META[sid]).then(l => (BEC = { id: sid, list: l }).list))
+      .then(l => { if (!document.body.contains(bc)) return; bc.innerHTML = l.slice(0, 20).map(t => cardHTML({ title: t.title, sub: t.artist, id: t.id, rq: t.id })).join('') || '<p class="muted small">Play a bit more to see similar songs.</p>'; })
+      .catch(() => { bc.innerHTML = ''; }); }
     const tr = $('#trend');
     if (tr) chart(0).then(ts => { if (!document.body.contains(tr)) return; tr.innerHTML = ts.slice(0, 25).map((t, i) => cardHTML({ title: t.title, sub: t.artist, id: t.id, cq: '0:' + i })).join(''); })
       .catch(() => { tr.innerHTML = '<p class="muted small">Charts unavailable right now.</p>'; });
@@ -944,8 +982,9 @@ async function viewHome() {
   draw();
   V.onclick = e => {
     const g = e.target.closest('[data-go]'); if (g && g.dataset.go) { go(g.dataset.go); return; }
+    const rq = e.target.closest('[data-rq]'); if (rq && rq.dataset.rq) { startRadio(META[rq.dataset.rq]); return; }
     const c = e.target.closest('[data-cq]'); if (c && c.dataset.cq) { const [gg, i] = c.dataset.cq.split(':'); playChart(gg, +i); return; }
-    const p = e.target.closest('[data-play]'); if (p && p.dataset.play) { const t = META[p.dataset.play]; if (t) { playQueue([t], 0, 'Recently played'); extendQueue(); } }
+    const p = e.target.closest('[data-play]'); if (p && p.dataset.play) { const t = META[p.dataset.play]; if (t) startRadio(t); }
   };
   if (hasHistory() && (!HOME || HOME.day !== dayKey() || Date.now() - HOME.at > 6 * 3600e3) && !homeBuilding) {
     homeBuilding = buildHome(partial => { HOME = Object.assign({}, HOME || {}, partial, { at: HOME ? HOME.at : 0 }); if (route().name === 'home') draw(); })
@@ -973,17 +1012,17 @@ function viewSearch(q = '') {
   const show = async (s, remote) => {
     const my = ++tok;
     const id = /youtu|^[\w-]{11}$/.test(s) ? ytId(s) : null;
-    if (id) { sr.innerHTML = '<p class="muted">Loading link…</p>'; try { const t = await meta(id); sr.innerHTML = rowHTML(t, 0); bindRows(sr, [t], 'Link', ''); } catch { sr.innerHTML = '<p class="empty">Couldn’t load that YouTube link.</p>'; } return; }
+    if (id) { sr.innerHTML = '<p class="muted">Loading link…</p>'; try { const t = await meta(id); sr.innerHTML = rowHTML(t, 0); bindRows(sr, [t], 'Link', '', { radio: true }); } catch { sr.innerHTML = '<p class="empty">Couldn’t load that YouTube link.</p>'; } return; }
     const loc = localResults(s);
     sr.innerHTML = (loc.length ? `<h3 class="sh">In your library</h3><div id="srl">${loc.map((t, i) => rowHTML(t, i)).join('')}</div>` : '') +
       `<div id="sra"><h3 class="sh">Songs</h3><p class="muted small">Searching…</p></div>` +
       (remote ? `<div id="srv"><h3 class="sh">Videos</h3><p class="muted small">Searching YouTube… this takes a few seconds</p></div>` : '');
-    if (loc.length) bindRows($('#srl'), loc, 'Search: ' + s, '');
+    if (loc.length) bindRows($('#srl'), loc, 'Search: ' + s, '', { radio: true });
     itunesSearch(s).then(ts => {
       if (my !== tok) return; const el = $('#sra');
       if (!ts.length) { el.innerHTML = remote ? '' : '<p class="muted small" style="margin-top:12px">No songs found. Press search to look on YouTube.</p>'; return; }
       el.innerHTML = '<h3 class="sh">Songs</h3>' + ts.map((t, i) => rowHTML(t, i)).join('');
-      bindRows(el, ts, 'Search: ' + s, '');
+      bindRows(el, ts, 'Search: ' + s, '', { radio: true });
       if (remote && ts[0]) resolveYT(ts[0]).catch(() => {});
     }).catch(() => { if (my === tok) $('#sra').innerHTML = ''; });
     if (!remote) return;
@@ -991,7 +1030,7 @@ function viewSearch(q = '') {
     ytSearch(s).then(ts => {
       if (my !== tok) return; const el = $('#srv');
       el.innerHTML = '<h3 class="sh">Videos</h3>' + ts.slice(0, 15).map((t, i) => rowHTML(t, i)).join('');
-      bindRows(el, ts.slice(0, 15), 'Search: ' + s, '');
+      bindRows(el, ts.slice(0, 15), 'Search: ' + s, '', { radio: true });
     }).catch(e => { if (my === tok) $('#srv').innerHTML = `<p class="muted small">YouTube search didn’t answer (${esc(e.message)}). Songs above still play.</p>`; });
   };
   let deb; inp.oninput = () => { clearTimeout(deb); deb = setTimeout(() => inp.value.trim() ? show(inp.value.trim(), false) : browse(), 450); };
@@ -1054,7 +1093,7 @@ async function viewList(key) {
   $('#bk').onclick = () => history.length > 1 ? history.back() : go('home');
   $('#lPlay').onclick = () => tracks.length && playQueue(tracks, 0, L.title, key);
   $('#lShuf').onclick = () => { PS.shuffle = !PS.shuffle; $('#lShuf').classList.toggle('on', PS.shuffle); renderPlayer(); if (PS.shuffle && tracks.length) playQueue(tracks, Math.floor(Math.random() * tracks.length), L.title, key); };
-  bindRows($('#lt'), tracks, L.title, key, { plId: L.plId });
+  bindRows($('#lt'), tracks, L.title, key, { plId: L.plId, radio: key.startsWith('chart:') });
   const imp = $('#imp'); if (imp) imp.onchange = e => importFiles(e.target.files);
   const pd = $('#plDel'); if (pd) pd.onclick = () => { if (confirm('Delete “' + L.title + '”?')) { delete PL[L.plId]; store.set('pl', PL); go('library'); } };
   const rr = $('#reroll'); if (rr) rr.onclick = () => { if (key.startsWith('radio:')) { store.del('mix:' + key.slice(6)); viewList(key); } else { HOME = null; store.del('home'); go('home'); toast('Rebuilding your mixes…'); } };

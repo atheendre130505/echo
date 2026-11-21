@@ -10,6 +10,17 @@ A phone-first music and video player that uses YouTube for its catalog. It runs 
 - **Downloads**: audio (MP3) or video (MP4). Downloads are saved to your phone and kept inside the app for offline playback.
 - **Library**: Liked Songs, playlists, Downloads (you can also import any audio/video file) and History. It also has backup and restore.
 
+## Song radio: more like what you're hearing
+
+Tap any song (from search, a chart, trending or recently played) and Echo plays it, then queues songs like it:
+
+- The song you're on counts most. Its YouTube Mix (the songs people play right after it) is the main signal. Songs near the top of that Mix are the closest matches, so they count more.
+- The Mixes of the 3 closest songs, plus the last couple of songs you finished, are folded in. Songs and artists that keep showing up across these related Mixes form the core of that sound, and rank highest.
+- Your overall taste only nudges the order a little, so the radio stays close to the current song.
+- Skip a song in the first 30 seconds and Echo removes that artist's queued songs. Skip twice in a row and it rebuilds the rest of the queue from the last song you listened to all the way through.
+
+Example from testing: Tum Hi Ho leads to Galliyan, Janam Janam, Agar Tum Saath Ho and Kaun Tujhe. Numb leads to Linkin Park, Eminem, Imagine Dragons and Green Day.
+
 ## How the recommendations work
 
 The design follows Spotify's publicly described approach, built from parts that are available for free:
