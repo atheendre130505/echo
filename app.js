@@ -67,8 +67,10 @@ const P = {
 const ic = n => { const [k, d] = P[n]; return `<svg class="${k}" viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`; };
 
 /* ───────────────────────── state ───────────────────────── */
-const S = Object.assign({ ytKey: '', geniusToken: '', cobaltUrl: '', cobaltKey: '', preferLocal: true, autoplay: true, mode: 'audio' }, store.get('settings', {}));
-const saveS = () => store.set('settings', S);
+const S = Object.assign({ ytKey: '', geniusToken: '', preferLocal: true, autoplay: true, mode: 'audio' }, store.get('settings', {}));
+delete S.cobaltUrl; delete S.cobaltKey;
+// Settings (incl. keys) are written to localStorage AND IndexedDB, and the browser is asked to keep storage persistent.
+const saveS = () => { store.set('settings', S); try { idb.kvSet('settings', JSON.parse(JSON.stringify(S))).catch(() => {}); navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {} };
 const META = store.get('meta', {});
 let metaT; const saveMeta = () => { clearTimeout(metaT); metaT = setTimeout(() => store.set('meta', META), 400); };
 const LIKES = store.get('likes', []);           // ordered ids, newest last
@@ -765,43 +767,51 @@ function syncLyrics(t, force) {
 function showAnn(i) { const r = LY.refs[i]; if (!r) return; sheet(`<div class="grab"></div><div class="mean small"><div class="fr">“${esc(r.fr)}”</div><p>${esc(r.body)}</p></div><span class="muted small">From Genius annotations</span>`); }
 
 /* ───────────────────────── downloads ─────────────────────────
-   In-app downloads go through a cobalt API server (cobalt is an
-   open-source downloader you can self-host). Files are saved to the
-   phone AND kept inside the app for offline playback. */
+   Downloads run through echo_dl.py (yt-dlp) on your own phone or computer.
+   The script listens on 127.0.0.1:8977, saves the file to Downloads/Echo,
+   and streams it back so the app can also keep it for offline playback. */
 const idb = (() => {
-  let dbp; const open = () => dbp || (dbp = new Promise((res, rej) => { const r = indexedDB.open('echo', 1); r.onupgradeneeded = () => r.result.createObjectStore('dl', { keyPath: 'key' }); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }));
-  const tx = async (mode, fn) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction('dl', mode); const q = fn(t.objectStore('dl')); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); };
-  return { put: v => tx('readwrite', s => s.put(v)), get: k => tx('readonly', s => s.get(k)), del: k => tx('readwrite', s => s.delete(k)), all: () => tx('readonly', s => s.getAll()) };
+  let dbp; const open = () => dbp || (dbp = new Promise((res, rej) => {
+    const r = indexedDB.open('echo', 2);
+    r.onupgradeneeded = () => { const db = r.result; if (!db.objectStoreNames.contains('dl')) db.createObjectStore('dl', { keyPath: 'key' }); if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv'); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  const tx = async (store_, mode, fn) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction(store_, mode); const q = fn(t.objectStore(store_)); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); };
+  return {
+    put: v => tx('dl', 'readwrite', s => s.put(v)), get: k => tx('dl', 'readonly', s => s.get(k)), del: k => tx('dl', 'readwrite', s => s.delete(k)), all: () => tx('dl', 'readonly', s => s.getAll()),
+    kvGet: k => tx('kv', 'readonly', s => s.get(k)), kvSet: (k, v) => tx('kv', 'readwrite', s => s.put(v, k)),
+  };
 })();
-const safeName = s => String(s).replace(/[\\/:*?"<>|]+/g, '').slice(0, 120);
+const HELPER = 'http://127.0.0.1:8977';
+const SETUP_CMD = `curl -fsSL ${location.origin}${location.pathname.replace(/[^/]*$/, '')}setup.sh | bash`;
+async function helperUp() {
+  try { const c = new AbortController(); setTimeout(() => c.abort(), 1500); const r = await fetch(HELPER + '/ping', { signal: c.signal }); return r.ok && (await r.json()).app === 'echo-dl'; } catch { return false; }
+}
+function helperSetup(t, kind) {
+  const s = sheet(`<div class="grab"></div><h3>Turn on downloads (one time)</h3>
+    <p class="muted small">Downloads use a small Python script (yt-dlp) that runs on your phone. Set it up once, then every Download button just works. Files go to <b>Downloads/Echo</b> and play offline here.</p>
+    <ol class="steps">
+      <li>Install <b>Termux</b> from <a href="https://f-droid.org/packages/com.termux/" target="_blank" rel="noopener">F-Droid</a> (the Play Store version is outdated).</li>
+      <li>Open Termux, paste this and press Enter. When it asks for storage access, tap Allow.<pre id="cmd">${esc(SETUP_CMD)}</pre><button class="btn ghost" id="cpy">Copy command</button></li>
+      <li>Leave Termux running in the background, come back here and tap <b>Try again</b>.</li>
+    </ol>
+    <p class="muted small">Next time, just open Termux once after restarting your phone; the helper starts by itself.</p>
+    <div class="bar"><button class="btn acc" id="retry">Try again</button></div>`);
+  $('#cpy', s).onclick = () => navigator.clipboard.writeText(SETUP_CMD).then(() => toast('Copied — paste it in Termux'));
+  $('#retry', s).onclick = () => { closeSheet(); download(t, kind); };
+}
 async function download(t, kind) {
-  const ytUrl = 'https://www.youtube.com/watch?v=' + t.id;
-  if (!S.cobaltUrl) {
-    try { await navigator.clipboard.writeText(ytUrl); } catch {}
-    sheet(`<div class="grab"></div><h3>Download “${esc(t.title)}”</h3>
-      <p class="muted small">For one-tap downloads inside the app, add a cobalt server in Settings. Until then you can use the cobalt website: the YouTube link has been copied — paste it there and choose ${kind === 'audio' ? '“audio”' : '“auto” (video)'}.</p>
-      <div class="bar"><a class="btn acc" href="https://cobalt.tools/" target="_blank" rel="noopener">Open cobalt.tools</a><button class="btn ghost" id="dlSet">Settings</button></div>
-      <p class="muted small" style="margin-top:16px">After it downloads you can add the file to <b>Library → Downloads → Import file</b> to play it offline here.</p>`);
-    $('#dlSet').onclick = openSettings; return;
-  }
-  const tn = toast(`Preparing ${kind}…`, 0);
+  if (!(await helperUp())) { helperSetup(t, kind); return; }
+  const tn = toast(`Downloading “${t.title}” on your phone…`, 0);
   try {
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (S.cobaltKey) headers.Authorization = 'Api-Key ' + S.cobaltKey;
-    const r = await fetch(S.cobaltUrl.replace(/\/+$/, '') + '/', { method: 'POST', headers, body: JSON.stringify({ url: ytUrl, downloadMode: kind === 'audio' ? 'audio' : 'auto', audioFormat: 'mp3', audioBitrate: '320', videoQuality: '720', youtubeVideoCodec: 'h264', filenameStyle: 'pretty' }) });
-    const j = await r.json().catch(() => ({}));
-    if (j.status === 'error' || !r.ok) throw new Error((j.error && j.error.code) || ('server ' + r.status));
-    const url = j.url || (j.picker && j.picker[0] && j.picker[0].url); if (!url) throw new Error('no file returned');
-    const fr = await fetch(url); if (!fr.ok) throw new Error('file ' + fr.status);
-    const total = +fr.headers.get('content-length') || 0, reader = fr.body.getReader(), chunks = []; let got = 0;
-    for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.length; tn.set(`Downloading ${kind} · ${total ? Math.round(got / total * 100) + '%' : (got / 1048576).toFixed(1) + ' MB'}`, total ? got / total : null); }
-    const type = fr.headers.get('content-type') || (kind === 'audio' ? 'audio/mpeg' : 'video/mp4');
-    const blob = new Blob(chunks, { type });
-    const ext = kind === 'audio' ? (/(mpeg|mp3)/.test(type) ? 'mp3' : /ogg|opus/.test(type) ? 'opus' : 'm4a') : (/webm/.test(type) ? 'webm' : 'mp4');
+    const r = await fetch(`${HELPER}/download?id=${encodeURIComponent(t.id)}&kind=${kind}`);
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'helper ' + r.status); }
+    const total = +r.headers.get('content-length') || 0, reader = r.body.getReader(), chunks = []; let got = 0;
+    for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.length; tn.set(`Saving into Echo · ${total ? Math.round(got / total * 100) + '%' : (got / 1048576).toFixed(1) + ' MB'}`, total ? got / total : null); }
+    const blob = new Blob(chunks, { type: r.headers.get('content-type') || (kind === 'audio' ? 'audio/mpeg' : 'video/mp4') });
     await saveLocal(t, kind, blob);
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = safeName(`${t.artist} - ${t.title}.${ext}`); document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
-    tn.set(`Downloaded “${t.title}” — saved to your phone and available offline`); tn.hide(3500);
-  } catch (e) { tn.set('Download failed: ' + e.message); tn.hide(5000); }
+    tn.set(`Downloaded “${t.title}” — in Downloads/Echo and playable offline`); tn.hide(4000);
+  } catch (e) { tn.set('Download failed: ' + String(e.message).replace(/^ERROR:\s*/, '').slice(0, 160)); tn.hide(6000); }
 }
 async function saveLocal(t, kind, blob) {
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}
@@ -898,17 +908,20 @@ function openSettings() {
     <label for="sGe">Genius access token (lyrics + meanings)</label>
     <input type="password" id="sGe" value="${esc(S.geniusToken)}" placeholder="Client access token" autocomplete="off">
     <div class="help">Free: <a href="https://genius.com/api-clients" target="_blank" rel="noopener">genius.com/api-clients</a> → New API Client (any URL) → Generate Access Token. Without it, lyrics come from lrclib only.</div>
-    <label for="sCo">cobalt server URL (in-app downloads)</label>
-    <input type="url" id="sCo" value="${esc(S.cobaltUrl)}" placeholder="https://your-cobalt-server.example">
-    <input type="password" id="sCk" value="${esc(S.cobaltKey)}" placeholder="API key (only if your server needs one)" style="margin-top:8px" autocomplete="off">
-    <div class="help"><a href="https://github.com/imputnet/cobalt/blob/main/docs/run-an-instance.md" target="_blank" rel="noopener">Run your own cobalt</a> (free, Docker). Without one, Download opens cobalt.tools with the link copied.</div>
+    <label>Downloads</label>
+    <div class="help" id="hlp">Checking the download helper…</div>
     <div class="tog"><span>Autoplay similar songs when the queue ends</span><input type="checkbox" id="sAuto" ${S.autoplay ? 'checked' : ''}></div>
     <div class="tog"><span>Play downloaded copy when available (works offline and in background)</span><input type="checkbox" id="sLoc" ${S.preferLocal ? 'checked' : ''}></div>
     <div class="bar"><button class="btn acc" id="sSave">Save</button><button class="btn ghost" id="sExp">Back up data</button><label class="btn ghost" style="margin:0;color:var(--tx)">Restore<input type="file" id="sImp" accept="application/json" hidden></label></div>
     <div class="bar"><button class="btn ghost" id="sRe">Refresh recommendations</button><button class="btn ghost" id="sClr">Clear listening history</button></div>
+    <label>Keep your keys safe</label>
+    <div class="help">Keys are saved on this phone permanently (in two places, and the browser is asked not to clear them). If the browser's data ever gets wiped, open your restore link once and everything comes back. It's a private link, so keep it to yourself (e.g. in your notes).</div>
+    <div class="bar"><button class="btn ghost" id="sLink">Copy restore link</button></div>
     <p class="help" style="margin-top:18px">Everything (history, likes, playlists, keys) stays on this device. Echo is not affiliated with YouTube, Spotify or Genius.</p>`);
+  helperUp().then(ok => { const h = $('#hlp'); if (h) h.innerHTML = ok ? '✓ Download helper is running. Downloads are saved to Downloads/Echo.' : 'Download helper not running. Tap Download on any song for the one-time setup, or open Termux if you already set it up.'; });
+  $('#sLink', s).onclick = () => { const keys = { ytKey: S.ytKey, geniusToken: S.geniusToken, country: S.country }; navigator.clipboard.writeText(location.origin + location.pathname + '#restore=' + btoa(unescape(encodeURIComponent(JSON.stringify(keys))))).then(() => toast('Restore link copied')); };
   $('#sSave', s).onclick = () => {
-    S.country = ($('#sCc').value.trim().toLowerCase().match(/^[a-z]{2}$/) || [''])[0]; S.ytKey = $('#sYt').value.trim(); S.geniusToken = $('#sGe').value.trim(); S.cobaltUrl = $('#sCo').value.trim(); S.cobaltKey = $('#sCk').value.trim();
+    S.country = ($('#sCc').value.trim().toLowerCase().match(/^[a-z]{2}$/) || [''])[0]; S.ytKey = $('#sYt').value.trim(); S.geniusToken = $('#sGe').value.trim();
     S.autoplay = $('#sAuto').checked; S.preferLocal = $('#sLoc').checked; saveS(); closeSheet(); toast('Saved'); if (cur()) loadLyrics(cur()); renderView();
   };
   $('#sExp', s).onclick = () => {
@@ -1158,6 +1171,21 @@ document.addEventListener('keydown', e => { if (e.target.matches('input')) retur
 (() => { let y0 = null; const np = $('#np'); np.addEventListener('touchstart', e => { y0 = np.scrollTop <= 0 && !e.target.closest('#seek,.np-media') ? e.touches[0].clientY : null; }, { passive: true }); np.addEventListener('touchend', e => { if (y0 != null && e.changedTouches[0].clientY - y0 > 110) closeNP(); y0 = null; }, { passive: true }); })();
 
 pruneCache();
+// Keys never need re-entering: restore from a restore link, or from the IndexedDB copy if localStorage was cleared.
+(() => {
+  const m = location.hash.match(/^#restore=(.+)$/);
+  if (m) {
+    try { const k = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); for (const f of ['ytKey', 'geniusToken', 'country']) if (k[f]) S[f] = k[f]; saveS(); setTimeout(() => toast('Your keys are restored'), 300); } catch {}
+    history.replaceState(null, '', location.pathname + '#home');
+  }
+})();
+idb.kvGet('settings').then(saved => {
+  const hasLocal = !!localStorage.getItem('echo:settings');
+  if (saved && (!hasLocal || (!S.geniusToken && saved.geniusToken) || (!S.ytKey && saved.ytKey))) {
+    for (const f of ['ytKey', 'geniusToken', 'country']) if (!S[f] && saved[f]) S[f] = saved[f];
+    store.set('settings', S); if (cur()) loadLyrics(cur()); renderView();
+  } else if (hasLocal) saveS();
+}).catch(() => {});
 renderView();
 renderLyrics();
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

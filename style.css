@@ -206,3 +206,7 @@ h3.sh{font-size:20px;margin:26px 0 12px;letter-spacing:-.2px}
 #np>.np-bg{position:absolute;max-width:none;margin:0}
 .genre-cov{display:flex;flex-direction:column;justify-content:flex-end;padding:12px;font-weight:800;font-size:20px;line-height:1.1}
 .genre-cov small{font-size:12px;font-weight:600;opacity:.85;margin-top:4px}
+.steps{padding-left:20px;margin:10px 0;color:var(--tx2);font-size:14px}
+.steps li{margin:8px 0}
+.steps a{color:var(--acc)}
+.steps pre{background:#111;border:1px solid #444;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#fff;margin:8px 0}

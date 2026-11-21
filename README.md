@@ -7,7 +7,7 @@ A phone-first music and video player that uses YouTube for its catalog. It runs 
 - **Home**: Daily Mixes, Discover Weekly, On Repeat, Jump back in, Recently played and radios for your top artists.
 - **Player**: switch between *Song* and *Video*, with shuffle, repeat, a queue, and autoplay radio when the queue runs out.
 - **Lyrics**: full lyrics from Genius, karaoke-style synced lyrics from lrclib, and a **Meaning** tab with Genius's "About this song" text and line-by-line explanations. Highlighted lyric lines can be tapped for their explanation.
-- **Downloads**: audio (MP3) or video (MP4). Downloads are saved to your phone and kept inside the app for offline playback.
+- **Downloads**: audio (MP3) or video (MP4) through a Python script (yt-dlp) running on your phone. Files go to Downloads/Echo and also play offline inside the app.
 - **Library**: Liked Songs, playlists, Downloads (you can also import any audio/video file) and History. It also has backup and restore.
 
 ## Song radio: more like what you're hearing
@@ -59,9 +59,27 @@ When you change a file later, increase the `?v=2` in `index.html` so phones load
 |---|---|---|
 | YouTube Data API key *(optional)* | Makes YouTube video results appear faster. Search already works without it. | console.cloud.google.com, then enable **YouTube Data API v3**, then **Credentials → Create API key**. Restrict it to `https://<you>.github.io/*`. |
 | Genius access token | Genius lyrics and song meanings | genius.com/api-clients, then **New API Client** (any URL), then **Generate Access Token** |
-| cobalt server *(optional)* | One-tap downloads inside the app | Self-host cobalt (github.com/imputnet/cobalt, Docker). Without it, Download copies the link and opens cobalt.tools. |
+Search, charts, playback, Mixes, radio, recommendations and synced lyrics need **no keys**. Keyless YouTube search goes through the free Jina reader (r.jina.ai), which allows about 20 searches a minute.
 
-Search, charts, playback, Mixes, radio, recommendations and synced lyrics need **no keys**. Keyless YouTube search goes through the free Jina reader (r.jina.ai), which allows about 20 searches a minute. Keys are stored only on your phone and are never in the repo.
+**You enter keys once.** They're saved on your phone in two places (localStorage and IndexedDB), and the app asks the browser to keep its storage permanently. If one copy is lost, the other restores it silently. For the worst case (all site data wiped), **Settings → Copy restore link** gives you a private link: open it once and your keys are back. Keys are never in the repo.
+
+## Downloads (Python + yt-dlp, on your phone)
+
+Downloads run through [`echo_dl.py`](echo_dl.py), a small Python script that uses yt-dlp. It runs on your own phone, so YouTube sees your normal connection. (Running it on GitHub's servers doesn't work: YouTube blocks them.)
+
+One-time setup on Android:
+
+1. Install **Termux** from F-Droid (the Play Store version is outdated).
+2. Open Termux and run:
+   ```bash
+   curl -fsSL https://atheendre130505.github.io/echo/setup.sh | bash
+   ```
+   This installs Python, ffmpeg and yt-dlp and starts the helper. It also makes the helper start whenever Termux opens.
+3. Tap Download in Echo. Songs are saved as MP3 (videos as MP4, 720p) to **Downloads/Echo**, and they also play offline inside the app.
+
+After restarting your phone, open Termux once. Run the same command again any time to update yt-dlp.
+
+On a computer, `pip install yt-dlp` then `python echo_dl.py --serve` does the same thing while you use Echo in that computer's browser. Without ffmpeg, audio is saved as M4A.
 
 ## Brave tips
 
